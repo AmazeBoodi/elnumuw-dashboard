@@ -109,13 +109,15 @@ div[data-testid="stButton"] button:hover {{ background:#2D3748; }}
 """, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DATA LOADING
+# DATA LOADING — supports file upload OR local file fallback
 # ══════════════════════════════════════════════════════════════════════════════
 @st.cache_data
-def load():
-    xl  = pd.ExcelFile(r"Elnumuw_Data.xlsx")
-    o   = xl.parse("Order Report")
-    i   = xl.parse("Items Report")
+def process(file_bytes):
+    """Parse and clean Excel bytes. Cached per unique file content."""
+    import io
+    xl = pd.ExcelFile(io.BytesIO(file_bytes))
+    o  = xl.parse("Order Report")
+    i  = xl.parse("Items Report")
     for df in [o, i]:
         df['Date']        = pd.to_datetime(df['Date'], errors='coerce').dt.normalize()
         df['Week Number'] = df['Date'].dt.isocalendar().week.astype(int)
@@ -131,10 +133,70 @@ def load():
     i['Quantity'] = pd.to_numeric(i['Quantity'], errors='coerce').fillna(0)
     return o, i
 
+# ── Upload widget in sidebar (shown before filters) ──────────────────────────
+with st.sidebar:
+    st.markdown("## 📊 Elnumuw")
+
+    st.markdown("""
+    <div style='background:#0F1117;border:1px solid #1E2433;border-radius:10px;
+                padding:.8rem 1rem;margin-bottom:.8rem;'>
+      <div style='font-size:.65rem;font-weight:700;text-transform:uppercase;
+                  letter-spacing:.08em;color:#64748B;margin-bottom:.5rem'>
+        📂 Data Source
+      </div>""", unsafe_allow_html=True)
+
+    uploaded = st.file_uploader(
+        "Upload Elnumuw_Data.xlsx",
+        type=["xlsx"],
+        help="Upload your Excel file to refresh the dashboard data",
+        label_visibility="collapsed",
+    )
+
+    if uploaded:
+        file_bytes = uploaded.read()
+        file_name  = uploaded.name
+        file_size  = len(file_bytes) / 1024
+        st.markdown(f"""
+        <div style='font-size:.7rem;color:#10B981;margin-top:.4rem'>
+          ✅ <b>{file_name}</b><br>
+          <span style='color:#64748B'>{file_size:.0f} KB · loaded successfully</span>
+        </div>""", unsafe_allow_html=True)
+    else:
+        file_bytes = None
+        st.markdown("""
+        <div style='font-size:.72rem;color:#F59E0B;margin-top:.3rem;line-height:1.5'>
+          ⬆️ Upload your <b>Elnumuw_Data.xlsx</b> above to load the dashboard
+        </div>""", unsafe_allow_html=True)
+
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("---")
+
+if not file_bytes:
+    st.markdown("""
+    <div style='display:flex;flex-direction:column;align-items:center;justify-content:center;
+                min-height:70vh;gap:1.2rem;text-align:center;'>
+      <div style='font-size:4rem'>📂</div>
+      <div style='font-size:1.4rem;font-weight:800;color:#F1F5F9;letter-spacing:-.02em'>
+        Upload your data to get started
+      </div>
+      <div style='font-size:.88rem;color:#64748B;max-width:420px;line-height:1.6'>
+        Open the <b style='color:#CBD5E1'>sidebar</b> using the
+        <b style='color:#CBD5E1'>← arrow</b> at the top left,
+        then upload <b style='color:#CBD5E1'>Elnumuw_Data.xlsx</b>.<br><br>
+        Your team can upload a new file at any time to refresh the dashboard.
+      </div>
+      <div style='background:#161B27;border:1px solid #1E2433;border-radius:12px;
+                  padding:.8rem 1.4rem;font-size:.8rem;color:#64748B;margin-top:.5rem'>
+        💡 The Excel file is never stored — it's only used for the current session
+      </div>
+    </div>""", unsafe_allow_html=True)
+    st.stop()
+
 try:
-    df_all_o, df_all_i = load()
+    df_all_o, df_all_i = process(file_bytes)
 except Exception as e:
-    st.error(f"Cannot load Elnumuw_Data.xlsx — {e}"); st.stop()
+    st.error(f"❌ Could not read the Excel file — make sure it has sheets named 'Order Report' and 'Items Report'. Error: {e}")
+    st.stop()
 
 G_MIN = df_all_o['Date'].min().date()
 G_MAX = df_all_o['Date'].max().date()
@@ -153,7 +215,6 @@ def avail(col, constraints):
     return sorted(df[col].dropna().unique())
 
 with st.sidebar:
-    st.markdown("## 📊 Elnumuw")
     st.markdown('<div class="sbl">Date Range</div>', unsafe_allow_html=True)
     date_range = st.date_input("", [G_MIN, G_MAX],
                                min_value=G_MIN, max_value=G_MAX,
