@@ -3,252 +3,20 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="Alnumuw Dashboard", page_icon="📊",
-                   layout="wide", initial_sidebar_state="collapsed")
+# We let Streamlit manage the background theme naturally based on device preferences
+st.set_page_config(page_title="Alnumuw Dashboard", page_icon="📊", layout="wide")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DESIGN TOKENS  — Option C: warm dark
+# COLOR SCHEMES & CONSTANTS
 # ══════════════════════════════════════════════════════════════════════════════
 BLUE   = "#3B82F6"; GREEN  = "#22C55E"; RED    = "#EF4444"
 AMBER  = "#F59E0B"; PURPLE = "#8B5CF6"; GRAY   = "#6B7280"; TEAL = "#14B8A6"
-PAL    = [BLUE, "#06B6D4", "#6366F1", "#A78BFA", "#EC4899",
-          GREEN, AMBER, "#F97316", TEAL, "#84CC16"]
+PAL    = [BLUE, "#06B6D4", "#6366F1", "#A78BFA", "#EC4899", GREEN, AMBER, "#F97316", TEAL, "#84CC16"]
 
 REJECTED_STATUSES = {"Canceled", "Cancelled", "Rejected"}
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CSS  — warm dark palette + top-bar filters + keyboard icon fix
-# ══════════════════════════════════════════════════════════════════════════════
-st.markdown(f"""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-@import url('https://fonts.googleapis.com/icon?family=Material+Icons+Round');
-
-*, [data-testid] {{ font-family:'Inter',sans-serif; }}
-
-/* ── APP BACKGROUND ── */
-[data-testid="stAppViewContainer"] {{ background:#111827; }}
-[data-testid="stHeader"] {{ background:transparent !important; }}
-.block-container {{ padding:1rem 1.75rem 3rem; max-width:1680px; }}
-
-/* ── SIDEBAR (upload-only, mostly hidden) ── */
-[data-testid="stSidebar"] {{
-    background:#1F2937;
-    border-right:0.5px solid #374151;
-    min-width:260px !important;
-    max-width:260px !important;
-}}
-[data-testid="stSidebar"] * {{
-    color:#D1D5DB !important;
-    font-family:'Inter',sans-serif !important;
-}}
-
-/* ── KPI CARD ── */
-.kpi {{
-    background:#1F2937;
-    border:0.5px solid #374151;
-    border-radius:12px;
-    padding:1rem 1.1rem;
-    position:relative;
-    overflow:hidden;
-    height:100%;
-}}
-.kpi-icon {{
-    position:absolute; top:.9rem; right:.9rem;
-    width:32px; height:32px; border-radius:8px;
-    display:flex; align-items:center; justify-content:center;
-    font-size:.85rem; opacity:.9;
-}}
-.kpi-accent {{ position:absolute; top:0; left:0; width:3px; height:100%;
-               border-radius:12px 0 0 12px; }}
-.kpi-label  {{ font-size:.68rem; font-weight:600; text-transform:uppercase;
-               letter-spacing:.08em; color:#6B7280; margin-bottom:.45rem; }}
-.kpi-value  {{ font-size:1.7rem; font-weight:700; color:#F9FAFB;
-               line-height:1; letter-spacing:-.03em; }}
-.kpi-delta  {{ font-size:.72rem; font-weight:600; margin-top:.35rem;
-               display:flex; align-items:center; gap:.25rem; }}
-.kpi-sub    {{ font-size:.65rem; color:#4B5563; margin-top:.2rem; }}
-.up         {{ color:{GREEN}; }}
-.down       {{ color:{RED}; }}
-.neu        {{ color:#6B7280; }}
-
-/* ── SECTION HEADER ── */
-.section-header {{
-    font-size:.68rem; font-weight:700; text-transform:uppercase;
-    letter-spacing:.1em; color:#6B7280; padding:.35rem 0;
-    border-bottom:0.5px solid #374151; margin:1.2rem 0 .9rem;
-}}
-.sub-label {{ font-size:.8rem; font-weight:600; color:#E5E7EB; margin-bottom:.4rem; }}
-
-/* ── POPOVER PILL FILTERS ── */
-/* font-size:0 on the button silences the built-in "expand_more" icon
-   that Streamlit appends; restored on <p> so only the label shows */
-[data-testid="stPopover"] button {{
-    background:#111827 !important;
-    border:0.5px solid #374151 !important;
-    border-radius:999px !important;
-    color:#9CA3AF !important;
-    font-size:0 !important;
-    font-weight:500 !important;
-    padding:.22rem .85rem !important;
-    min-height:30px !important;
-    height:auto !important;
-    width:100% !important;
-    justify-content:center !important;
-    white-space:nowrap !important;
-    overflow:hidden !important;
-}}
-[data-testid="stPopover"] button p,
-[data-testid="stPopover"] button [data-testid="stMarkdownContainer"] p {{
-    font-size:.72rem !important;
-    line-height:1.4 !important;
-    color:#9CA3AF !important;
-    font-weight:500 !important;
-    margin:0 !important;
-    overflow:hidden !important;
-    text-overflow:ellipsis !important;
-    white-space:nowrap !important;
-}}
-[data-testid="stPopover"] button:hover {{
-    background:#1F2937 !important;
-    border-color:#6B7280 !important;
-}}
-[data-testid="stPopover"] button:hover p,
-[data-testid="stPopover"] button:hover [data-testid="stMarkdownContainer"] p {{
-    color:#E5E7EB !important;
-}}
-
-/* ── COMPARISON BANNER ── */
-.cmp-bar {{
-    background:rgba(59,130,246,.08);
-    border:0.5px solid rgba(59,130,246,.3);
-    border-radius:8px;
-    padding:.5rem .9rem; font-size:.75rem; color:#93C5FD;
-    font-weight:500; margin-bottom:.9rem;
-    display:flex; align-items:center; gap:.5rem; flex-wrap:wrap;
-}}
-
-/* ── TABS ── */
-[data-testid="stTabs"] {{ border-bottom:0.5px solid #374151; }}
-[data-testid="stTabs"] button {{
-    color:#6B7280 !important; font-size:.82rem; font-weight:500;
-    padding:.5rem 1rem; background:transparent !important;
-    border-bottom:2px solid transparent !important;
-    border-radius:0 !important; margin-bottom:-1px;
-    transition: color .15s;
-}}
-[data-testid="stTabs"] button[aria-selected="true"] {{
-    color:{BLUE} !important;
-    border-bottom:2px solid {BLUE} !important;
-    font-weight:700 !important;
-}}
-[data-testid="stTabs"] button:hover {{ color:#D1D5DB !important; }}
-
-/* ── MULTISELECT TAGS ── */
-[data-testid="stMultiSelect"] span[data-baseweb="tag"] {{
-    background:rgba(59,130,246,.18) !important;
-    color:#93C5FD !important;
-    border:0.5px solid rgba(59,130,246,.4) !important;
-    border-radius:5px !important; font-size:.7rem !important;
-}}
-
-/* ── SIDEBAR BUTTON ── */
-div[data-testid="stButton"] button {{
-    background:#374151; border:0.5px solid #4B5563;
-    color:#E5E7EB !important; border-radius:8px;
-    font-size:.75rem; padding:.35rem .9rem; width:100%; font-weight:500;
-}}
-div[data-testid="stButton"] button:hover {{ background:#4B5563; }}
-
-/* ── DATAFRAME ── */
-[data-testid="stDataFrame"] {{
-    border:0.5px solid #374151 !important;
-    border-radius:8px !important;
-}}
-[data-testid="stDataFrame"] th {{
-    background:#1F2937 !important; color:#9CA3AF !important;
-    font-size:.7rem !important; font-weight:600 !important;
-    text-transform:uppercase; letter-spacing:.06em !important;
-}}
-[data-testid="stDataFrame"] td {{
-    background:#111827 !important; color:#E5E7EB !important;
-    font-size:.8rem !important;
-}}
-
-/* ── BADGE ── */
-.badge {{ display:inline-block; padding:.15rem .55rem;
-          border-radius:20px; font-size:.68rem; font-weight:600; }}
-.badge-up   {{ background:rgba(34,197,94,.18);  color:{GREEN}; }}
-.badge-down {{ background:rgba(239,68,68,.18);  color:{RED}; }}
-
-/* ── MULTISELECT: cap height so 5+ tags don't blow up the row ── */
-[data-testid="stMultiSelect"] [data-baseweb="select"] > div:first-child {{
-    max-height:64px; overflow-y:auto;
-    scrollbar-width:thin; scrollbar-color:#374151 transparent;
-}}
-
-/* ── SIDEBAR FILE UPLOADER: clean up native button ── */
-[data-testid="stSidebar"] [data-testid="stFileUploader"] section {{
-    background:#111827 !important;
-    border:0.5px solid #374151 !important;
-    border-radius:8px !important;
-    padding:.5rem .75rem !important;
-}}
-[data-testid="stSidebar"] [data-testid="stFileUploader"] section button {{
-    background:#1F2937 !important;
-    border:0.5px solid #4B5563 !important;
-    color:#D1D5DB !important;
-    border-radius:6px !important;
-    font-size:.75rem !important;
-    padding:.3rem .8rem !important;
-    width:auto !important;
-}}
-[data-testid="stSidebar"] [data-testid="stFileUploader"] label {{
-    font-size:.72rem !important;
-    color:#9CA3AF !important;
-    font-weight:500 !important;
-}}
-
-/* ── EXPORT BUTTON ── */
-div[data-testid="stDownloadButton"] button {{
-    background:#1F2937 !important;
-    border:0.5px solid #374151 !important;
-    color:#D1D5DB !important;
-    border-radius:8px !important;
-    font-size:.78rem !important;
-    padding:.4rem 1rem !important;
-    width:auto !important;
-}}
-div[data-testid="stDownloadButton"] button:hover {{
-    background:#374151 !important;
-    border-color:{BLUE} !important;
-    color:{BLUE} !important;
-}}
-
-/* ── FIX: Material Icons font not available locally — hide all icon text ── */
-span.material-icons,
-span.material-icons-round,
-span.material-icons-sharp,
-span.material-icons-outlined,
-span.material-symbols-outlined,
-span.material-symbols-rounded {{
-    font-size:0 !important;
-    max-width:0 !important;
-    overflow:hidden !important;
-    display:inline-block !important;
-    vertical-align:middle !important;
-}}
-/* Keep sidebar toggle button visible (just hide text inside) */
-button[data-testid="baseButton-headerNoPadding"] {{
-    overflow:hidden;
-}}
-
-#MainMenu, footer {{ visibility:hidden; }}
-</style>
-""", unsafe_allow_html=True)
-
-# ══════════════════════════════════════════════════════════════════════════════
-# DATA LOADING
+# DATA ENGINE
 # ══════════════════════════════════════════════════════════════════════════════
 @st.cache_data
 def process(file_bytes):
@@ -256,1091 +24,645 @@ def process(file_bytes):
     xl = pd.ExcelFile(io.BytesIO(file_bytes))
     o  = xl.parse("Order Report")
     i  = xl.parse("Items Report")
+    
     for df in [o, i]:
         df['Date']        = pd.to_datetime(df['Date'], errors='coerce').dt.normalize()
         df['Week Number'] = df['Date'].dt.isocalendar().week.astype(int)
         df['Month']       = df['Date'].dt.month
         df['Month Name']  = df['Date'].dt.strftime('%B')
         df['Year']        = df['Date'].dt.year
-    for col in ['Brand', 'Provider', 'Technology', 'Status', 'Location']:
+        
+    categorical_cols = ['Brand', 'Provider', 'Technology', 'Status', 'Location']
+    for col in categorical_cols:
         for df in [o, i]:
             if col in df.columns:
                 df[col] = df[col].astype(str).str.strip().str.title()
+                
     o['Sales']    = pd.to_numeric(o['Sales'],    errors='coerce').fillna(0)
     o['Discount'] = pd.to_numeric(o['Discount'], errors='coerce').fillna(0)
     i['Quantity'] = pd.to_numeric(i['Quantity'], errors='coerce').fillna(0)
     return o, i
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SIDEBAR — upload only
+# DATA UPLOADER GATEWAY
 # ══════════════════════════════════════════════════════════════════════════════
-with st.sidebar:
-    st.markdown(
-        "<div style='font-size:1.1rem;font-weight:700;color:#F9FAFB;"
-        "padding:.4rem 0 .6rem;letter-spacing:-.01em'>📊 Alnumuw</div>",
-        unsafe_allow_html=True)
+st.title("📊 Alnumuw Operational Dashboard")
 
-    st.markdown(
-        "<div style='font-size:.62rem;font-weight:700;text-transform:uppercase;"
-        "letter-spacing:.09em;color:#6B7280;margin-bottom:.3rem'>📂 Data Source</div>",
-        unsafe_allow_html=True)
+uploaded = st.file_uploader("Upload Elnumuw_Data.xlsx to populate dashboard views", type=["xlsx"])
 
-    uploaded = st.file_uploader(
-        "Excel file (.xlsx)",
-        type=["xlsx"],
-        help="File stays local — never stored or sent anywhere",
-        label_visibility="visible",
-    )
-
-    if uploaded:
-        file_bytes = uploaded.read()
-        st.markdown(
-            f"<div style='font-size:.7rem;color:#34D399;margin:.3rem 0 .5rem'>"
-            f"✅ <b>{uploaded.name}</b> &nbsp;"
-            f"<span style='color:#6B7280'>{len(file_bytes)//1024} KB</span></div>",
-            unsafe_allow_html=True)
-    else:
-        file_bytes = None
-        st.markdown(
-            "<div style='font-size:.72rem;color:#FBBF24;margin:.3rem 0 .5rem;"
-            "line-height:1.5'>⬆️ Upload <b>Alnumuw_Data.xlsx</b> to begin</div>",
-            unsafe_allow_html=True)
-
-    st.markdown("<hr style='border:none;border-top:0.5px solid #374151;margin:.6rem 0'>",
-                unsafe_allow_html=True)
-    st.caption("Filter pills live above the dashboard →")
-
-# ══════════════════════════════════════════════════════════════════════════════
-# GATE — nothing loaded yet
-# ══════════════════════════════════════════════════════════════════════════════
-if not file_bytes:
-    st.markdown("""
-    <div style='display:flex;flex-direction:column;align-items:center;
-                justify-content:center;min-height:72vh;gap:1.2rem;text-align:center;'>
-      <div style='font-size:3.5rem'>📂</div>
-      <div style='font-size:1.4rem;font-weight:700;color:#F9FAFB;letter-spacing:-.02em'>
-        Upload your data to get started
-      </div>
-      <div style='font-size:.88rem;color:#6B7280;max-width:400px;line-height:1.7'>
-        Click the <b style='color:#D1D5DB'>← arrow</b> at the top-left to open the sidebar,
-        then upload <b style='color:#D1D5DB'>Alnumuw_Data.xlsx</b>.
-      </div>
-      <div style='background:#1F2937;border:0.5px solid #374151;border-radius:10px;
-                  padding:.75rem 1.4rem;font-size:.78rem;color:#6B7280;margin-top:.4rem'>
-        💡 Your file is never stored — it only exists for this session
-      </div>
-    </div>""", unsafe_allow_html=True)
+if not uploaded:
+    st.info("⬆️ Please upload your Excel data sheet package above to begin.")
     st.stop()
 
 try:
-    df_all_o, df_all_i = process(file_bytes)
+    df_all_o, df_all_i = process(uploaded.read())
 except Exception as e:
-    st.error(f"❌ Could not read file — ensure it has sheets named "
-             f"'Order Report' and 'Items Report'. Error: {e}")
+    st.error(f"❌ Error reading worksheets: {e}")
     st.stop()
 
 G_MIN = df_all_o['Date'].min().date()
 G_MAX = df_all_o['Date'].max().date()
 
-master = df_all_o[
-    ['Order ID', 'Brand', 'Provider', 'Technology', 'Location', 'Status']
-].merge(df_all_i[['Order ID', 'Items']].drop_duplicates(), on='Order ID', how='left')
+# ── on_click callbacks for reset buttons. Mutating widget state via a callback
+# is the Streamlit-blessed pattern; it runs before the next rerun's widgets
+# are instantiated, which is the only reliable way to truly reset a widget
+# that has already been rendered in this session.
+_FILTER_KEYS = ["v_Brand", "v_Provider", "v_Location", "v_Technology", "v_Status", "v_Items"]
+
+def _cb_clear_filters():
+    # Explicitly set each multiselect's value to an empty list. This is more
+    # reliable than pop() because Streamlit reads the value from session_state
+    # at widget instantiation; SETTING the key guarantees the new state.
+    for _k in _FILTER_KEYS:
+        st.session_state[_k] = []
+
+def _cb_reset_date():
+    # Explicitly set the date_input back to the full data window. pop() does
+    # not always make st.date_input fall back to its default arg on the next
+    # rerun, so we set the value directly to (G_MIN, G_MAX).
+    st.session_state["date_range_key"] = (G_MIN, G_MAX)
+
+if 'Items' in df_all_i.columns:
+    df_all_i['Items'] = df_all_i['Items'].astype(str).str.strip()
+
+# Relational mapping matrix for dynamic cascading controls.
+# Orders with no matching line in Items Report get a sentinel label so they
+# are visible in the Items filter rather than silently dropped when the user
+# picks specific items. Date is included so the filter options can also
+# narrow when the user changes the date range.
+UNMATCHED_ITEM_LABEL = "(Orders without line items)"
+items_extracted = df_all_i[['Order ID', 'Items']].dropna().drop_duplicates()
+master_map = df_all_o[['Order ID', 'Date', 'Brand', 'Provider', 'Technology', 'Location', 'Status']].merge(
+    items_extracted, on='Order ID', how='left'
+)
+master_map['Items'] = master_map['Items'].fillna(UNMATCHED_ITEM_LABEL)
+_unmatched_order_count = master_map[master_map['Items'] == UNMATCHED_ITEM_LABEL]['Order ID'].nunique()
+
+# Cached "full universe" of options per dimension — used as a safe fallback
+# when the user has not selected anything, so unselected filters don't
+# accidentally constrain the data when combined with other filters.
+ALL_OPTS = {col: sorted(master_map[col].dropna().unique().tolist())
+            for col in ['Brand', 'Provider', 'Location', 'Technology', 'Status', 'Items']}
+
+# Bidirectional cascading filter: every filter's option list is narrowed by
+# every OTHER filter's selection PLUS the current date range. To avoid the
+# circular case where a new pick would silently drop an already-selected
+# value, we union the narrowed set with whatever the user has currently
+# selected — so user picks never disappear from the option list.
+#
+# All access is via st.session_state, which is the native Streamlit pattern,
+# and the date range is read from the same widget key that the date_input
+# above uses ("date_range_key"). No extra libraries.
+_FILTER_ORDER = ['Brand', 'Provider', 'Location', 'Technology', 'Status', 'Items']
+
+def _current_date_window():
+    """Read the current date-input range from session_state, falling back to
+    the full data span. Returns (start_timestamp, end_timestamp)."""
+    dr = st.session_state.get("date_range_key", None)
+    if dr and len(dr) == 2:
+        return pd.Timestamp(dr[0]), pd.Timestamp(dr[1])
+    return pd.Timestamp(G_MIN), pd.Timestamp(G_MAX)
+
+def get_allowed_options(target_col):
+    if target_col not in _FILTER_ORDER:
+        return sorted(master_map[target_col].dropna().unique().tolist())
+    df = master_map
+    # Narrow by the current date window
+    ds, de = _current_date_window()
+    df = df[(df['Date'] >= ds) & (df['Date'] <= de)]
+    # Narrow by every other filter's selection
+    for f in _FILTER_ORDER:
+        if f != target_col:
+            selected = st.session_state.get(f"v_{f}", [])
+            if selected:
+                df = df[df[f].isin(selected)]
+    allowed = set(df[target_col].dropna().unique().tolist())
+    # Preserve the user's existing picks for the target filter so they are
+    # never silently dropped when another filter changes.
+    user_picks = set(st.session_state.get(f"v_{target_col}", []) or [])
+    return sorted(allowed | user_picks)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CASCADING FILTER HELPER
+# TIMELINE RANGE CONTROLS (TOP ROW)
 # ══════════════════════════════════════════════════════════════════════════════
-def avail(col, constraints):
-    df = master.copy()
-    for c, vals in constraints.items():
-        if c != col and vals:
-            df = df[df[c].isin(vals)]
-    return sorted(df[col].dropna().unique())
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TOP FILTER BAR  — popover pill design
-# ══════════════════════════════════════════════════════════════════════════════
-
-# ── Popover filter helper
-def popover_filter(label, col_name, key, icon=""):
-    """Render a pill button that opens a popover with a multiselect inside."""
-    cx = {
-        'Brand':      st.session_state.get('f_brand',  []),
-        'Technology': st.session_state.get('f_tech',   []),
-        'Provider':   st.session_state.get('f_prov',   []),
-        'Location':   st.session_state.get('f_loc',    []),
-        'Status':     st.session_state.get('f_status', []),
-        'Items':      st.session_state.get('f_items',  []),
-    }
-    opts   = avail(col_name, cx)
-    stored = st.session_state.get(key, [])
-    current = [s for s in stored if s in opts]
-    count   = len(current)
-    pill    = f"{icon} {label}  ·  {count}" if count else f"{icon} {label}"
-    with st.popover(pill, use_container_width=True):
-        st.caption(f"Select {label.lower()} — empty = all")
-        sel = st.multiselect(
-            label, opts, default=current, key=key,
-            placeholder=f"All ({len(opts)})",
-            label_visibility="collapsed",
-        )
-    return sel if sel else opts
-
-# ── Row 1: date range + comparison toggle + reset
-_fc1, _fc2, _fc3 = st.columns([2.2, 2, 0.65])
-with _fc1:
+_c1, _c2, _c3 = st.columns([2, 1.5, 1])
+with _c1:
     date_range = st.date_input(
-        "📅 Date range", [G_MIN, G_MAX],
+        "📅 Date Range Window",
+        [G_MIN, G_MAX],
         min_value=G_MIN, max_value=G_MAX,
-        label_visibility="visible",
+        key="date_range_key",
     )
 sd = date_range[0] if len(date_range) == 2 else G_MIN
 ed = date_range[1] if len(date_range) == 2 else G_MAX
 
-n_days = (pd.Timestamp(ed) - pd.Timestamp(sd)).days + 1
-cmp_e  = pd.Timestamp(sd) - pd.Timedelta(days=1)
-cmp_s  = max(cmp_e - pd.Timedelta(days=n_days - 1), pd.Timestamp(G_MIN))
+with _c2:
+    st.markdown("<div style='height:1.6rem'></div>", unsafe_allow_html=True)
+    compare_on = st.toggle("🔁 Activate Period Comparison", value=False)
 
-with _fc2:
-    compare_on = st.toggle("🔁 Compare with previous period", value=False)
-with _fc3:
-    reset = st.button("↺ Reset", use_container_width=True)
-    if reset:
-        for k in ['f_brand', 'f_tech', 'f_prov', 'f_loc', 'f_status', 'f_items']:
-            st.session_state.pop(k, None)
-        st.rerun()
+with _c3:
+    st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
+    st.button(
+        "📅 Reset Date",
+        use_container_width=True,
+        help="Reset the date range to the full data window",
+        on_click=_cb_reset_date,
+    )
 
 if compare_on:
-    cr = st.date_input(
-        "Compare to period", [cmp_s.date(), cmp_e.date()],
-        min_value=G_MIN, max_value=G_MAX,
-    )
-    if len(cr) == 2:
-        cmp_s, cmp_e = pd.Timestamp(cr[0]), pd.Timestamp(cr[1])
+    n_days = (pd.Timestamp(ed) - pd.Timestamp(sd)).days + 1
+    cmp_e  = pd.Timestamp(sd) - pd.Timedelta(days=1)
+    cmp_s  = max(cmp_e - pd.Timedelta(days=n_days - 1), pd.Timestamp(G_MIN))
+    
+    _cc1, _cc2 = st.columns([2, 2])
+    with _cc1:
+        cr = st.date_input("Compare to historical period", [cmp_s.date(), cmp_e.date()], min_value=G_MIN, max_value=G_MAX)
+        if len(cr) == 2:
+            cmp_s, cmp_e = pd.Timestamp(cr[0]), pd.Timestamp(cr[1])
 
-st.markdown("<div style='height:.3rem'></div>", unsafe_allow_html=True)
-
-# ── Row 2: filter pills
-_p1, _p2, _p3, _p4, _p5, _p6 = st.columns([1, 1, 1, 1, 1, 1])
-with _p1: brand  = popover_filter("Brand",      "Brand",      "f_brand",  "🏷️")
-with _p2: prov   = popover_filter("Aggregator", "Provider",   "f_prov",   "🚚")
-with _p3: loc    = popover_filter("Branch",     "Location",   "f_loc",    "📍")
-with _p4: tech   = popover_filter("Technology", "Technology", "f_tech",   "⚙️")
-with _p5: status = popover_filter("Status",     "Status",     "f_status", "✅")
-with _p6:
-    i_opts    = avail('Items', {'Brand': brand, 'Provider': prov,
-                                'Technology': tech, 'Status': status})
-    stored_i  = st.session_state.get('f_items', [])
-    current_i = [s for s in stored_i if s in i_opts]
-    count_i   = len(current_i)
-    pill_i    = f"🛒 Item  ·  {count_i}" if count_i else "🛒 Item"
-    with st.popover(pill_i, use_container_width=True):
-        st.caption("Select items — empty = all")
-        item_raw = st.multiselect(
-            "Item", i_opts, default=current_i, key="f_items",
-            placeholder=f"All ({len(i_opts)})",
-            label_visibility="collapsed",
-        )
-    item_f = item_raw if item_raw else i_opts
-
-st.markdown("<div style='height:.4rem'></div>", unsafe_allow_html=True)
+st.markdown("---")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# FILTER FUNCTIONS
+# STREAMLIT SIDEBAR CONTROLS FOR MULTI-ITEM LOGIC
 # ══════════════════════════════════════════════════════════════════════════════
-def fo(s=None, e=None):
-    df = df_all_o
-    s  = pd.Timestamp(s or sd)
-    e  = pd.Timestamp(e or ed)
-    m  = ((df['Date'] >= s) & (df['Date'] <= e) &
-          df['Brand'].isin(brand) & df['Provider'].isin(prov) &
-          df['Location'].isin(loc) & df['Status'].isin(status) &
-          df['Technology'].isin(tech))
-    return df[m]
+def _count_active(key):
+    """How many items are currently selected in a given filter key."""
+    return len(st.session_state.get(key, []) or [])
 
-def fi(s=None, e=None):
-    df = df_all_i
-    s  = pd.Timestamp(s or sd)
-    e  = pd.Timestamp(e or ed)
-    m  = ((df['Date'] >= s) & (df['Date'] <= e) &
-          df['Brand'].isin(brand) & df['Provider'].isin(prov) &
-          df['Technology'].isin(tech) & df['Status'].isin(status) &
-          df['Items'].isin(item_f))
-    if 'Location' in df.columns:
-        m = m & df['Location'].isin(loc)
-    return df[m]
+def _expander_label(emoji, name, key):
+    n = _count_active(key)
+    return f"{emoji} {name}" + (f"  ·  {n} selected" if n else "")
 
-def norm(df):
-    d = df.copy(); d["Date"] = d["Date"].dt.normalize(); return d
+with st.sidebar:
+    st.subheader("🔍 Filters Panel")
 
-# ══════════════════════════════════════════════════════════════════════════════
-# AGGREGATION & HELPERS
-# ══════════════════════════════════════════════════════════════════════════════
-def agg(o, i):
-    sales     = o['Sales'].sum()
-    orders    = o['Order ID'].nunique()
-    completed = o[o['Status'] == 'Completed']['Order ID'].nunique()
-    rejected  = o[o['Status'].isin(REJECTED_STATUSES)]['Order ID'].nunique()
-    fill_rate = (completed / orders * 100) if orders else 0
-    return dict(
-        sales=sales, orders=orders, aov=(sales / orders) if orders else 0,
-        qty=i['Quantity'].sum(), disc=o['Discount'].sum(),
-        completed=completed, rejected=rejected, fill_rate=fill_rate,
+    # Clear-all button — uses on_click callback so widget state is mutated
+    # before the next rerun renders the multiselects.
+    st.button(
+        "🧹 Clear Filters",
+        use_container_width=True,
+        help="Clear every filter selection (date range is untouched)",
+        on_click=_cb_clear_filters,
     )
 
-def pct(a, b):
-    if b and b != 0: return round((a - b) / abs(b) * 100, 1)
-    return None
+    # Each filter is wrapped in an expander so the sidebar stays compact when
+    # many items are selected. Header shows the active selection count.
+    with st.expander(_expander_label("🏷️", "Filter by Brand", "v_Brand"),
+                     expanded=_count_active("v_Brand") > 0):
+        sel_brand = st.multiselect("Brand", options=get_allowed_options("Brand"),
+                                   key="v_Brand", label_visibility="collapsed")
 
-def delta_inline(v):
-    if v is None: return '<span class="neu">—</span>'
-    arr = "↑" if v >= 0 else "↓"
-    cls = "up" if v >= 0 else "down"
-    return f'<span class="{cls}">{arr} {abs(v):.1f}%</span>'
+    with st.expander(_expander_label("🚚", "Filter by Provider", "v_Provider"),
+                     expanded=_count_active("v_Provider") > 0):
+        sel_prov = st.multiselect("Provider", options=get_allowed_options("Provider"),
+                                  key="v_Provider", label_visibility="collapsed")
 
-def color_growth(val):
-    try:
-        v = float(val)
-        if v > 0: return 'color: #4ADE80; font-weight:600'
-        if v < 0: return 'color: #F87171; font-weight:600'
-    except (TypeError, ValueError):
-        pass
-    return 'color: #6B7280'
+    with st.expander(_expander_label("📍", "Filter by Branch", "v_Location"),
+                     expanded=_count_active("v_Location") > 0):
+        sel_loc = st.multiselect("Branch", options=get_allowed_options("Location"),
+                                 key="v_Location", label_visibility="collapsed")
 
-# ── Chart theme
-DARK = dict(
-    template="plotly_dark",
-    paper_bgcolor="rgba(0,0,0,0)",
-    plot_bgcolor="rgba(0,0,0,0)",
-    font=dict(family="Inter", color="#9CA3AF", size=11),
-    margin=dict(t=10, b=30, l=10, r=10),
-)
-_ck = {"n": 0}
+    with st.expander(_expander_label("⚙️", "Filter by Tech", "v_Technology"),
+                     expanded=_count_active("v_Technology") > 0):
+        sel_tech = st.multiselect("Technology", options=get_allowed_options("Technology"),
+                                  key="v_Technology", label_visibility="collapsed")
 
-def pc(fig, h=300):
-    fig.update_layout(height=h, **DARK)
-    fig.update_xaxes(showgrid=True, gridcolor="#1F2937", zeroline=False,
-                     linecolor="#374151", tickfont=dict(size=10))
-    fig.update_yaxes(showgrid=True, gridcolor="#1F2937", zeroline=False,
-                     linecolor="#374151", tickfont=dict(size=10))
-    _ck["n"] += 1
-    st.plotly_chart(fig, use_container_width=True, key=f"c{_ck['n']}")
+    with st.expander(_expander_label("✅", "Filter by Status", "v_Status"),
+                     expanded=_count_active("v_Status") > 0):
+        sel_status = st.multiselect("Status", options=get_allowed_options("Status"),
+                                    key="v_Status", label_visibility="collapsed")
 
-# ── KPI card with icon
-def kpi_card(col, label, val_str, chg, sub, accent, icon="💰"):
-    d  = delta_inline(chg) if compare_on else ""
-    vs = f"<div class='kpi-sub'>vs {sub}</div>" if compare_on else ""
-    col.markdown(f"""
-    <div class="kpi">
-      <div class="kpi-accent" style="background:{accent}"></div>
-      <div class="kpi-icon" style="background:{accent}20">{icon}</div>
-      <div class="kpi-label">{label}</div>
-      <div class="kpi-value">{val_str}</div>
-      <div class="kpi-delta">{d}</div>
-      {vs}
-    </div>""", unsafe_allow_html=True)
+    with st.expander(_expander_label("🛒", "Filter by Product Item", "v_Items"),
+                     expanded=_count_active("v_Items") > 0):
+        sel_items = st.multiselect("Items", options=get_allowed_options("Items"),
+                                   key="v_Items", label_visibility="collapsed")
+        if _unmatched_order_count > 0:
+            st.caption(
+                f"ℹ️ {_unmatched_order_count} orders have no matching items in the Items sheet — they "
+                f"appear as \"{UNMATCHED_ITEM_LABEL}\". Picking only real items will exclude them."
+            )
 
-def section(title):
-    st.markdown(f'<div class="section-header">{title}</div>', unsafe_allow_html=True)
-
-# ── Excel export helper
-def to_excel_bytes(sheets: dict) -> bytes:
-    """Convert a dict of {sheet_name: DataFrame} to Excel bytes."""
-    import io
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        for name, df in sheets.items():
-            df.to_excel(writer, sheet_name=name[:31], index=False)
-    return buf.getvalue()
-
-def export_button(tab_name: str, sheets: dict):
-    """Render a download button that exports filtered data to Excel."""
-    st.markdown("<div style='height:.6rem'></div>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div style='font-size:.65rem;color:#6B7280;margin-bottom:.25rem'>"
-        f"Export reflects current filters · {sd} → {ed}</div>",
-        unsafe_allow_html=True)
-    xlsx = to_excel_bytes(sheets)
-    fname = f"alnumuw_{tab_name.lower().replace(' ','_')}_{sd}_{ed}.xlsx"
-    st.download_button(
-        label="⬇️  Export to Excel",
-        data=xlsx,
-        file_name=fname,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=False,
-    )
+# When a filter has no user selection, fall back to the full universe of
+# values from ALL_OPTS (not the cascaded set). This keeps "no filter" meaning
+# "no constraint on this dimension" even in comparison mode where the
+# historical period may include values outside the current narrowed set.
+active_brands  = sel_brand  or ALL_OPTS['Brand']
+active_provs   = sel_prov   or ALL_OPTS['Provider']
+active_locs    = sel_loc    or ALL_OPTS['Location']
+active_techs   = sel_tech   or ALL_OPTS['Technology']
+active_status  = sel_status or ALL_OPTS['Status']
+active_items   = sel_items  or ALL_OPTS['Items']
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PULL & AGGREGATE
+# COMPILING MATRICES
 # ══════════════════════════════════════════════════════════════════════════════
-o_cur = fo(sd, ed);        i_cur = fi(sd, ed)
-o_cmp = fo(cmp_s, cmp_e); i_cmp = fi(cmp_s, cmp_e)
-cur      = agg(o_cur, i_cur)
-cmp_data = agg(o_cmp, i_cmp)
+# Track whether the user has actively filtered Status so KPIs that depend on
+# rejections (Fill Rate) can fall back to a Status-unfiltered slice. Otherwise
+# selecting only "Completed" would force Fill Rate to 100% by construction.
+status_user_filtered = bool(sel_status)
+
+def compile_split_data(start_d, end_d, ignore_status=False):
+    status_list = active_status if not ignore_status else ALL_OPTS['Status']
+    o_df = df_all_o[
+        (df_all_o['Date'] >= pd.Timestamp(start_d)) & (df_all_o['Date'] <= pd.Timestamp(end_d)) &
+        (df_all_o['Brand'].isin(active_brands)) & (df_all_o['Provider'].isin(active_provs)) &
+        (df_all_o['Location'].isin(active_locs)) & (df_all_o['Status'].isin(status_list)) &
+        (df_all_o['Technology'].isin(active_techs))
+    ]
+    ids = master_map[master_map['Items'].isin(active_items)]['Order ID'].unique()
+    o_df = o_df[o_df['Order ID'].isin(ids)]
+    i_df = df_all_i[df_all_i['Order ID'].isin(o_df['Order ID']) & df_all_i['Items'].isin(active_items)]
+    return o_df, i_df
+
+o_cur, i_cur = compile_split_data(sd, ed)
+
+# Status-unfiltered current slice for Fill Rate, so the KPI stays meaningful
+# even when the user has filtered Status in the sidebar.
+o_cur_fr, _ = compile_split_data(sd, ed, ignore_status=True)
+
+rev_cur = o_cur['Sales'].sum()
+ord_cur = len(o_cur)
+qty_cur = i_cur['Quantity'].sum()
+fr_total = len(o_cur_fr)
+fr_rej   = len(o_cur_fr[o_cur_fr['Status'].isin(REJECTED_STATUSES)])
+fill_cur = ((fr_total - fr_rej) / fr_total * 100) if fr_total > 0 else 100.0
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PREVIOUS PERIOD COMPUTATION (always defined so tabs can reference safely)
+# ══════════════════════════════════════════════════════════════════════════════
+if compare_on:
+    o_old, i_old = compile_split_data(cmp_s, cmp_e)
+    o_old_fr, _  = compile_split_data(cmp_s, cmp_e, ignore_status=True)
+else:
+    o_old    = df_all_o.iloc[0:0].copy()
+    i_old    = df_all_i.iloc[0:0].copy()
+    o_old_fr = df_all_o.iloc[0:0].copy()
+
+rev_old  = o_old['Sales'].sum() if not o_old.empty else 0.0
+ord_old  = len(o_old)
+qty_old  = i_old['Quantity'].sum() if not i_old.empty else 0.0
+comp_old = len(o_old_fr[~o_old_fr['Status'].isin(REJECTED_STATUSES)]) if not o_old_fr.empty else 0
+rej_old  = len(o_old_fr[o_old_fr['Status'].isin(REJECTED_STATUSES)]) if not o_old_fr.empty else 0
+fr_total_old = len(o_old_fr)
+fr_rej_old   = len(o_old_fr[o_old_fr['Status'].isin(REJECTED_STATUSES)]) if not o_old_fr.empty else 0
+fill_old = ((fr_total_old - fr_rej_old) / fr_total_old * 100) if fr_total_old > 0 else 100.0
+disc_old = o_old['Discount'].sum() if not o_old.empty else 0.0
+net_old  = rev_old - disc_old
+
+# Completed/Rejected for current period (always Status-unfiltered).
+comp_cur = len(o_cur_fr[~o_cur_fr['Status'].isin(REJECTED_STATUSES)])
+rej_cur  = len(o_cur_fr[o_cur_fr['Status'].isin(REJECTED_STATUSES)])
+disc_cur = o_cur['Discount'].sum()
+net_cur  = rev_cur - disc_cur
+
+def _pct(cur, old):
+    return ((cur - old) / old * 100) if old > 0 else 0.0
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SUMMARY KPI TILES (5)
+# ══════════════════════════════════════════════════════════════════════════════
+k_cols = st.columns(5)
+fill_label = "🎯 Fill Rate %" + (" *" if status_user_filtered else "")
 
 if compare_on:
-    st.markdown(
-        f'<div class="cmp-bar">🔁 <b>{sd} → {ed}</b>'
-        f'&nbsp; vs &nbsp;<b>{cmp_s.date()} → {cmp_e.date()}</b>'
-        f'&nbsp;·&nbsp; {n_days}-day windows</div>',
-        unsafe_allow_html=True)
+    k_cols[0].metric("💰 Gross Revenue", f"{rev_cur:,.2f} SAR", f"{_pct(rev_cur, rev_old):+.1f}% vs Prev")
+    k_cols[1].metric("📦 Total Orders", f"{ord_cur:,}", f"{_pct(ord_cur, ord_old):+.1f}% vs Prev")
+    k_cols[2].metric("✅ Completed Orders", f"{comp_cur:,}", f"{_pct(comp_cur, comp_old):+.1f}% vs Prev")
+    k_cols[3].metric("❌ Rejected Orders", f"{rej_cur:,}", f"{_pct(rej_cur, rej_old):+.1f}% vs Prev", delta_color="inverse")
+    k_cols[4].metric(fill_label, f"{fill_cur:.2f}%", f"{(fill_cur - fill_old):+.1f} pp vs Prev")
+    st.caption(f"Net Revenue (Sales − Discount): **{net_cur:,.2f} SAR** current  ·  **{net_old:,.2f} SAR** previous  ·  Discount given this period: {disc_cur:,.2f} SAR")
+else:
+    k_cols[0].metric("💰 Gross Revenue", f"{rev_cur:,.2f} SAR")
+    k_cols[1].metric("📦 Total Orders", f"{ord_cur:,}")
+    k_cols[2].metric("✅ Completed Orders", f"{comp_cur:,}")
+    k_cols[3].metric("❌ Rejected Orders", f"{rej_cur:,}")
+    k_cols[4].metric(fill_label, f"{fill_cur:.2f}%")
+    st.caption(f"Net Revenue (Sales − Discount): **{net_cur:,.2f} SAR**  ·  Discount given: {disc_cur:,.2f} SAR")
 
-if o_cur.empty:
-    st.warning("⚠️ No data for this selection. Adjust the filters or date range.")
-    st.stop()
+if status_user_filtered:
+    st.caption("\\* Fill Rate ignores the Status filter so it stays meaningful (otherwise filtering to 'Completed' would force it to 100%).")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# COMPARISON TABLE HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+def build_dim_comparison(cur_df, old_df, dim_col, with_compare):
+    """Per-dimension breakdown: Current Sales/Orders + Previous + Diff + Growth%
+    when with_compare. Sorted by Current Sales desc."""
+    cur = cur_df.groupby(dim_col).agg(Sales=('Sales','sum'), Orders=('Order ID','count')).reset_index()
+    cur.columns = [dim_col, 'Current Sales', 'Current Orders']
+    if not with_compare or old_df.empty:
+        return cur.sort_values('Current Sales', ascending=False).reset_index(drop=True)
+    old = old_df.groupby(dim_col).agg(Sales=('Sales','sum'), Orders=('Order ID','count')).reset_index()
+    old.columns = [dim_col, 'Previous Sales', 'Previous Orders']
+    df = cur.merge(old, on=dim_col, how='outer').fillna(0)
+    df['Difference'] = df['Current Sales'] - df['Previous Sales']
+    df['Growth %'] = ((df['Current Sales'] - df['Previous Sales']) /
+                      df['Previous Sales'].replace(0, pd.NA)) * 100
+    return df.sort_values('Current Sales', ascending=False).reset_index(drop=True)
+
+def comparison_column_config(with_compare):
+    cfg = {
+        "Current Sales":  st.column_config.NumberColumn("Current Sales (SAR)",  format="%.2f"),
+        "Current Orders": st.column_config.NumberColumn("Current Orders"),
+    }
+    if with_compare:
+        cfg.update({
+            "Previous Sales":  st.column_config.NumberColumn("Previous Sales (SAR)",  format="%.2f"),
+            "Previous Orders": st.column_config.NumberColumn("Previous Orders"),
+            "Difference":      st.column_config.NumberColumn("Difference (SAR)",      format="%.2f"),
+            "Growth %":        st.column_config.NumberColumn("Growth %",              format="%.1f%%"),
+        })
+    return cfg
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TABS
 # ══════════════════════════════════════════════════════════════════════════════
-t1, t2, t3, t4, t5 = st.tabs([
-    "📊  Summary",
-    "📦  Orders",
-    "💰  Revenue & Sales",
-    "🛒  Items",
-    "🏪  Branches",
-])
+st.markdown("<br>", unsafe_allow_html=True)
+tab_summary, tab_orders, tab_items, tab_branches, tab_aggs, tab_brands, tab_tech = st.tabs(
+    ["📊 Summary", "📦 Orders", "🛒 Items", "📍 Branches", "🚚 Aggregators", "🏷️ Brands", "⚙️ Technologies"]
+)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TAB 1 — SUMMARY
-# ─────────────────────────────────────────────────────────────────────────────
-with t1:
-    st.markdown("<div style='height:.4rem'></div>", unsafe_allow_html=True)
+# ── Summary timeline with current vs previous overlay
+with tab_summary:
+    st.markdown("### 📈 Revenue & Order Volume Timeline")
+    if not o_cur.empty:
+        cur_trend = o_cur.groupby('Date').agg(Sales=('Sales','sum'), Orders=('Order ID','count')).reset_index()
 
-    k1, k2, k3 = st.columns(3)
-    kpi_card(k1, "Total Revenue",   f"SAR {cur['sales']:,.0f}",
-             pct(cur['sales'], cmp_data['sales']),
-             f"SAR {cmp_data['sales']:,.0f}", BLUE, "💰")
-    kpi_card(k2, "Total Orders",    f"{cur['orders']:,}",
-             pct(cur['orders'], cmp_data['orders']),
-             f"{cmp_data['orders']:,}", "#6366F1", "🛒")
-    kpi_card(k3, "Avg Order Value", f"SAR {cur['aov']:,.2f}",
-             pct(cur['aov'], cmp_data['aov']),
-             f"SAR {cmp_data['aov']:,.2f}", AMBER, "📈")
-
-    st.markdown("<div style='height:.5rem'></div>", unsafe_allow_html=True)
-
-    k4, k5, k6 = st.columns(3)
-    kpi_card(k4, "Completed Orders", f"{cur['completed']:,}",
-             pct(cur['completed'], cmp_data['completed']),
-             f"{cmp_data['completed']:,}", TEAL, "✅")
-    kpi_card(k5, "Rejected Orders",  f"{cur['rejected']:,}",
-             pct(cur['rejected'], cmp_data['rejected']),
-             f"{cmp_data['rejected']:,}", RED, "❌")
-    kpi_card(k6, "Fill Rate",        f"{cur['fill_rate']:.1f}%",
-             pct(cur['fill_rate'], cmp_data['fill_rate']),
-             f"{cmp_data['fill_rate']:.1f}%", PURPLE, "📊")
-
-    st.markdown("<div style='height:.5rem'></div>", unsafe_allow_html=True)
-
-    section("Revenue Over Time")
-    daily = norm(o_cur).groupby('Date')['Sales'].sum().reset_index()
-    fig   = go.Figure()
-
-    if compare_on and not o_cmp.empty:
-        daily_c = norm(o_cmp).groupby('Date')['Sales'].sum().reset_index()
-        daily['Day']   = range(1, len(daily) + 1)
-        daily_c['Day'] = range(1, len(daily_c) + 1)
+        fig = go.Figure()
         fig.add_trace(go.Scatter(
-            x=daily['Day'], y=daily['Sales'],
-            name=f"Current  ({sd} → {ed})",
-            line=dict(color=BLUE, width=2.5),
-            fill='tozeroy', fillcolor='rgba(59,130,246,0.08)',
-            mode='lines+markers', marker=dict(size=4, color=BLUE),
-            hovertemplate="Day %{x}<br><b>SAR %{y:,.0f}</b><extra>Current</extra>",
+            x=cur_trend['Date'], y=cur_trend['Sales'],
+            name="Current Revenue", mode='lines+markers',
+            line=dict(color=BLUE, width=3),
+            hovertemplate="<b>%{x|%Y-%m-%d}</b><br>Current Revenue: %{y:,.2f} SAR<extra></extra>"
         ))
-        fig.add_trace(go.Scatter(
-            x=daily_c['Day'], y=daily_c['Sales'],
-            name=f"Previous ({cmp_s.date()} → {cmp_e.date()})",
-            line=dict(color="#9CA3AF", width=1.8, dash='dot'),
-            mode='lines+markers', marker=dict(size=4, color="#9CA3AF"),
-            hovertemplate="Day %{x}<br><b>SAR %{y:,.0f}</b><extra>Previous</extra>",
-        ))
-        fig.update_layout(xaxis_title="Day of Period",
-                          legend=dict(orientation='h', y=1.15, x=0,
-                                      bgcolor='rgba(0,0,0,0)'))
-    else:
-        fig.add_trace(go.Scatter(
-            x=daily['Date'], y=daily['Sales'], name="Revenue",
-            line=dict(color=BLUE, width=2.5),
-            fill='tozeroy', fillcolor='rgba(59,130,246,0.08)', mode='lines',
-            hovertemplate="%{x|%b %d}<br><b>SAR %{y:,.0f}</b><extra></extra>",
-        ))
-        fig.update_layout(xaxis=dict(tickformat="%b %d"))
 
-    pc(fig, 260)
-
-    section("Breakdown")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown('<div class="sub-label">By Aggregator</div>', unsafe_allow_html=True)
-        pv = (o_cur.groupby('Provider').agg(Revenue=('Sales', 'sum'))
-                   .reset_index().sort_values('Revenue', ascending=False))
-        fig = px.bar(pv, x='Revenue', y='Provider', orientation='h',
-                     text_auto='.2s', color_discrete_sequence=[BLUE])
-        fig.update_traces(marker_color=BLUE, textfont_size=10)
-        fig.update_layout(showlegend=False, yaxis=dict(categoryorder='total ascending'))
-        pc(fig, 240)
-    with c2:
-        st.markdown('<div class="sub-label">By Brand (Top 8)</div>', unsafe_allow_html=True)
-        bb = (o_cur.groupby('Brand')['Sales'].sum()
-                   .sort_values(ascending=False).head(8).reset_index())
-        fig = px.bar(bb, x='Sales', y='Brand', orientation='h',
-                     text_auto='.2s', color_discrete_sequence=["#6366F1"])
-        fig.update_layout(showlegend=False, yaxis=dict(categoryorder='total ascending'))
-        pc(fig, 240)
-    with c3:
-        st.markdown('<div class="sub-label">By Technology</div>', unsafe_allow_html=True)
-        td = o_cur.groupby('Technology')['Sales'].sum().reset_index()
-        fig = px.pie(td, values='Sales', names='Technology', hole=0.55,
-                     color_discrete_sequence=[BLUE, "#6366F1", GREEN, AMBER])
-        fig.update_traces(textposition='outside', textinfo='percent+label', textfont_size=11)
-        fig.update_layout(showlegend=False)
-        pc(fig, 240)
-
-    section("Aggregator Performance — click any column header to sort ↕")
-    pt = (o_cur.groupby('Provider').agg(
-            Revenue=('Sales', 'sum'),
-            Orders=('Order ID', 'nunique'),
-            AOV=('Sales', 'mean'),
-            Discount=('Discount', 'sum'),
-            Completed=('Status', lambda x: (x == 'Completed').sum()),
-            Rejected=('Status', lambda x: x.isin(REJECTED_STATUSES).sum()),
-          ).reset_index().sort_values('Revenue', ascending=False).reset_index(drop=True))
-    pt['Fill Rate %'] = (pt['Completed'] / pt['Orders'] * 100).round(1)
-
-    if compare_on and not o_cmp.empty:
-        pc2 = (o_cmp.groupby('Provider')
-                    .agg(Rev_Prev=('Sales', 'sum'), Ord_Prev=('Order ID', 'nunique'))
-                    .reset_index())
-        pt = pt.merge(pc2, on='Provider', how='left').fillna(0)
-        pt['Rev Diff']   = (pt['Revenue'] - pt['Rev_Prev']).round(0)
-        pt['Rev Growth'] = pt.apply(lambda r: pct(r['Revenue'], r['Rev_Prev']), axis=1)
-        pt['Ord Growth'] = pt.apply(lambda r: pct(r['Orders'],  r['Ord_Prev']),  axis=1)
-        disp = pt[['Provider', 'Revenue', 'Rev_Prev', 'Rev Diff', 'Rev Growth',
-                   'Orders', 'Ord_Prev', 'Ord Growth', 'AOV', 'Fill Rate %']].copy()
-        disp.columns = ['Aggregator', 'Revenue (SAR)', 'Prev Revenue (SAR)',
-                        'Diff (SAR)', 'Rev Growth %',
-                        'Orders', 'Prev Orders', 'Ord Growth %',
-                        'AOV (SAR)', 'Fill Rate %']
-        grw = ['Rev Growth %', 'Ord Growth %']
-        styled = disp.style.applymap(color_growth, subset=grw)
-    else:
-        disp = pt[['Provider', 'Revenue', 'Orders', 'AOV', 'Discount',
-                   'Completed', 'Rejected', 'Fill Rate %']].copy()
-        disp.columns = ['Aggregator', 'Revenue (SAR)', 'Orders', 'AOV (SAR)',
-                        'Discount (SAR)', 'Completed', 'Rejected', 'Fill Rate %']
-        styled = disp.style
-
-    st.dataframe(
-        styled.format({
-            col: "{:,.0f}" for col in disp.columns
-            if any(x in col for x in ('SAR', 'Orders', 'Prev Orders',
-                                       'Completed', 'Rejected'))
-        } | {"Fill Rate %": "{:.1f}%",
-             **({k: "{:+.1f}" for k in ['Rev Growth %', 'Ord Growth %']}
-                if compare_on else {})}),
-        use_container_width=True, hide_index=True,
-    )
-
-    # ── Export
-    export_cols = ['Order ID', 'Date', 'Brand', 'Provider', 'Technology',
-                   'Location', 'Status', 'Sales', 'Discount']
-    export_button("Summary", {
-        "Aggregator Performance": disp.reset_index(drop=True),
-        "Filtered Orders":        o_cur[[c for c in export_cols if c in o_cur.columns]],
-    })
-    st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TAB 2 — ORDERS
-# ─────────────────────────────────────────────────────────────────────────────
-with t2:
-    st.markdown("<div style='height:.4rem'></div>", unsafe_allow_html=True)
-
-    cmp_days = max((pd.Timestamp(cmp_e) - pd.Timestamp(cmp_s)).days + 1, 1)
-    apd      = cur['orders'] / n_days
-    cmp_apd  = cmp_data['orders'] / cmp_days
-
-    k1, k2, k3, k4 = st.columns(4)
-    kpi_card(k1, "Total Orders",     f"{cur['orders']:,}",
-             pct(cur['orders'], cmp_data['orders']),
-             f"{cmp_data['orders']:,}", BLUE, "🛒")
-    kpi_card(k2, "Avg Orders / Day", f"{apd:.1f}",
-             pct(apd, cmp_apd), f"{cmp_apd:.1f}", "#6366F1", "📅")
-    kpi_card(k3, "Avg Order Value",  f"SAR {cur['aov']:,.2f}",
-             pct(cur['aov'], cmp_data['aov']),
-             f"SAR {cmp_data['aov']:,.2f}", AMBER, "💳")
-    kpi_card(k4, "Rejected Orders",  f"{cur['rejected']:,}",
-             pct(cur['rejected'], cmp_data['rejected']),
-             f"{cmp_data['rejected']:,}", RED, "❌")
-
-    st.markdown("<div style='height:.4rem'></div>", unsafe_allow_html=True)
-
-    section("Daily Orders Trend")
-    od  = norm(o_cur).groupby('Date')['Order ID'].nunique().reset_index(name='Orders')
-    fig = go.Figure()
-
-    if compare_on and not o_cmp.empty:
-        od2 = norm(o_cmp).groupby('Date')['Order ID'].nunique().reset_index(name='Orders')
-        od['Day']  = range(1, len(od) + 1)
-        od2['Day'] = range(1, len(od2) + 1)
-        fig.add_trace(go.Scatter(
-            x=od['Day'], y=od['Orders'],
-            name=f"Current  ({sd} → {ed})",
-            line=dict(color=BLUE, width=2.5),
-            fill='tozeroy', fillcolor='rgba(59,130,246,0.08)',
-            mode='lines+markers', marker=dict(size=4),
-            hovertemplate="Day %{x}<br><b>%{y:,} orders</b><extra>Current</extra>",
-        ))
-        fig.add_trace(go.Scatter(
-            x=od2['Day'], y=od2['Orders'],
-            name=f"Previous ({cmp_s.date()} → {cmp_e.date()})",
-            line=dict(color="#9CA3AF", width=1.8, dash='dot'),
-            mode='lines+markers', marker=dict(size=4, color="#9CA3AF"),
-            hovertemplate="Day %{x}<br><b>%{y:,} orders</b><extra>Previous</extra>",
-        ))
-        fig.update_layout(xaxis_title="Day of Period",
-                          legend=dict(orientation='h', y=1.15, x=0,
-                                      bgcolor='rgba(0,0,0,0)'))
-    else:
-        fig.add_trace(go.Scatter(
-            x=od['Date'], y=od['Orders'], name="Orders",
-            line=dict(color=BLUE, width=2.5),
-            fill='tozeroy', fillcolor='rgba(59,130,246,0.08)', mode='lines',
-            hovertemplate="%{x|%b %d}<br><b>%{y:,} orders</b><extra></extra>",
-        ))
-        fig.update_layout(xaxis=dict(tickformat="%b %d"))
-
-    pc(fig, 250)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        section("Orders by Day of Week")
-        o2       = o_cur.copy(); o2['Weekday'] = o2['Date'].dt.day_name()
-        wd_order = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
-        wd = (o2.groupby('Weekday')['Order ID'].nunique()
-                .reindex(wd_order).fillna(0).reset_index(name='Orders'))
-        fig = px.bar(wd, x='Weekday', y='Orders', color='Orders',
-                     color_continuous_scale=[[0, '#1E3A5F'], [1, BLUE]], text_auto=True)
-        fig.update_layout(coloraxis_showscale=False, showlegend=False,
-                          xaxis_tickangle=-30)
-        pc(fig, 240)
-    with c2:
-        section("Orders by Status")
-        sf  = o_cur.groupby('Status')['Order ID'].nunique().reset_index(name='Orders')
-        clr = {s: (GREEN if s == 'Completed'
-                   else RED if s in REJECTED_STATUSES else AMBER)
-               for s in sf['Status']}
-        fig = px.pie(sf, values='Orders', names='Status', hole=0.58,
-                     color='Status', color_discrete_map=clr)
-        fig.update_traces(textposition='outside', textinfo='percent+label', textfont_size=11)
-        fig.update_layout(showlegend=False)
-        pc(fig, 240)
-
-    section("Orders by Brand — click any column header to sort ↕")
-    bt = (o_cur.groupby('Brand').agg(
-            Orders=('Order ID', 'nunique'),
-            Revenue=('Sales', 'sum'),
-            AOV=('Sales', 'mean'),
-            Completed=('Status', lambda x: (x == 'Completed').sum()),
-            Rejected=('Status', lambda x: x.isin(REJECTED_STATUSES).sum()),
-          ).reset_index().sort_values('Orders', ascending=False).reset_index(drop=True))
-    bt['Fill Rate %'] = (bt['Completed'] / bt['Orders'] * 100).round(1)
-
-    if compare_on and not o_cmp.empty:
-        bc2 = (o_cmp.groupby('Brand')
-                    .agg(Ord_Prev=('Order ID', 'nunique'), Rev_Prev=('Sales', 'sum'))
-                    .reset_index())
-        bt = bt.merge(bc2, on='Brand', how='left').fillna(0)
-        bt['Ord Growth'] = bt.apply(lambda r: pct(r['Orders'],  r['Ord_Prev']),  axis=1)
-        bt['Rev Growth'] = bt.apply(lambda r: pct(r['Revenue'], r['Rev_Prev']), axis=1)
-        disp = bt[['Brand', 'Orders', 'Ord_Prev', 'Ord Growth',
-                   'Revenue', 'Rev_Prev', 'Rev Growth', 'AOV', 'Fill Rate %']].copy()
-        disp.columns = ['Brand', 'Orders', 'Prev Orders', 'Ord Growth %',
-                        'Revenue (SAR)', 'Prev Revenue (SAR)', 'Rev Growth %',
-                        'AOV (SAR)', 'Fill Rate %']
-        styled = disp.style.applymap(color_growth, subset=['Ord Growth %', 'Rev Growth %'])
-    else:
-        disp = bt[['Brand', 'Orders', 'Revenue', 'AOV',
-                   'Completed', 'Rejected', 'Fill Rate %']].copy()
-        disp.columns = ['Brand', 'Orders', 'Revenue (SAR)', 'AOV (SAR)',
-                        'Completed', 'Rejected', 'Fill Rate %']
-        styled = disp.style
-
-    st.dataframe(
-        styled.format({
-            col: "{:,.0f}" for col in disp.columns
-            if any(x in col for x in ('SAR', 'Orders', 'Prev Orders',
-                                       'Completed', 'Rejected'))
-        } | {"Fill Rate %": "{:.1f}%",
-             **({k: "{:+.1f}" for k in ['Ord Growth %', 'Rev Growth %']}
-                if compare_on else {})}),
-        use_container_width=True, hide_index=True,
-    )
-
-    # ── Export
-    export_cols = ['Order ID', 'Date', 'Brand', 'Provider', 'Technology',
-                   'Location', 'Status', 'Sales', 'Discount']
-    export_button("Orders", {
-        "Orders by Brand": disp.reset_index(drop=True),
-        "Filtered Orders": o_cur[[c for c in export_cols if c in o_cur.columns]],
-    })
-    st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TAB 3 — REVENUE & SALES
-# ─────────────────────────────────────────────────────────────────────────────
-with t3:
-    st.markdown("<div style='height:.4rem'></div>", unsafe_allow_html=True)
-
-    gross = cur['sales'];       disc = cur['disc'];    net = gross - disc
-    cg    = cmp_data['sales'];  cd   = cmp_data['disc']; cn = cg - cd
-
-    k1, k2, k3, k4 = st.columns(4)
-    kpi_card(k1, "Gross Revenue",   f"SAR {gross:,.0f}",
-             pct(gross, cg), f"SAR {cg:,.0f}", BLUE, "💰")
-    kpi_card(k2, "Net Revenue",     f"SAR {net:,.0f}",
-             pct(net, cn),   f"SAR {cn:,.0f}", GREEN, "📈")
-    kpi_card(k3, "Total Discount",  f"SAR {disc:,.0f}",
-             pct(disc, cd),  f"SAR {cd:,.0f}", AMBER, "🏷️")
-    kpi_card(k4, "Avg Order Value", f"SAR {cur['aov']:,.2f}",
-             pct(cur['aov'], cmp_data['aov']),
-             f"SAR {cmp_data['aov']:,.2f}", PURPLE, "🧾")
-
-    st.markdown("<div style='height:.4rem'></div>", unsafe_allow_html=True)
-
-    section("Daily Revenue & Discount")
-    rd  = norm(o_cur).groupby('Date').agg(
-            Revenue=('Sales', 'sum'), Discount=('Discount', 'sum')).reset_index()
-    fig = go.Figure()
-
-    if compare_on and not o_cmp.empty:
-        rd2 = norm(o_cmp).groupby('Date').agg(
-                Revenue=('Sales', 'sum'), Discount=('Discount', 'sum')).reset_index()
-        rd['Day']  = range(1, len(rd) + 1)
-        rd2['Day'] = range(1, len(rd2) + 1)
-        fig.add_trace(go.Scatter(
-            x=rd['Day'], y=rd['Revenue'], name="Revenue · Current",
-            line=dict(color=BLUE, width=2.5), fill='tozeroy',
-            fillcolor='rgba(59,130,246,0.07)', mode='lines+markers',
-            marker=dict(size=4),
-            hovertemplate="Day %{x}<br><b>SAR %{y:,.0f}</b><extra>Revenue Current</extra>",
-        ))
-        fig.add_trace(go.Scatter(
-            x=rd2['Day'], y=rd2['Revenue'], name="Revenue · Previous",
-            line=dict(color="#9CA3AF", width=1.8, dash='dot'),
-            mode='lines+markers', marker=dict(size=4, color="#9CA3AF"),
-            hovertemplate="Day %{x}<br><b>SAR %{y:,.0f}</b><extra>Revenue Prev</extra>",
-        ))
-        fig.add_trace(go.Scatter(
-            x=rd['Day'], y=rd['Discount'], name="Discount",
-            line=dict(color=AMBER, width=1.5, dash='dash'), mode='lines',
-            hovertemplate="Day %{x}<br><b>SAR %{y:,.0f}</b><extra>Discount</extra>",
-        ))
-        fig.update_layout(xaxis_title="Day of Period")
-    else:
-        fig.add_trace(go.Scatter(
-            x=rd['Date'], y=rd['Revenue'], name="Revenue",
-            line=dict(color=BLUE, width=2.5), fill='tozeroy',
-            fillcolor='rgba(59,130,246,0.07)', mode='lines',
-            hovertemplate="%{x|%b %d}<br><b>SAR %{y:,.0f}</b><extra>Revenue</extra>",
-        ))
-        fig.add_trace(go.Scatter(
-            x=rd['Date'], y=rd['Discount'], name="Discount",
-            line=dict(color=AMBER, width=1.8, dash='dot'), mode='lines',
-            hovertemplate="%{x|%b %d}<br><b>SAR %{y:,.0f}</b><extra>Discount</extra>",
-        ))
-        fig.update_layout(xaxis=dict(tickformat="%b %d"))
-
-    fig.update_layout(legend=dict(orientation='h', y=1.15, x=0, bgcolor='rgba(0,0,0,0)'))
-    pc(fig, 260)
-
-    col1, col2 = st.columns(2)
-    with col1:
-        section("Weekly Revenue")
-        wk = (o_cur.groupby(['Year', 'Week Number'])['Sales'].sum().reset_index())
-        wk['Wk'] = wk['Year'].astype(str) + '-W' + wk['Week Number'].astype(str).str.zfill(2)
-        wk = wk.sort_values(['Year', 'Week Number'])
-        if compare_on and not o_cmp.empty:
-            wk2 = o_cmp.groupby(['Year', 'Week Number'])['Sales'].sum().reset_index()
-            wk2['Wk'] = (wk2['Year'].astype(str) + '-W' +
-                         wk2['Week Number'].astype(str).str.zfill(2))
-            wk['Type'] = 'Current'; wk2['Type'] = 'Previous'
-            fig = px.bar(pd.concat([wk, wk2]), x='Wk', y='Sales', color='Type',
-                         barmode='group',
-                         color_discrete_map={'Current': BLUE, 'Previous': GRAY},
-                         text_auto='.2s')
-            fig.update_layout(legend=dict(orientation='h', y=1.12, x=0,
-                                          bgcolor='rgba(0,0,0,0)'))
-        else:
-            fig = px.bar(wk, x='Wk', y='Sales', text_auto='.2s',
-                         color_discrete_sequence=[BLUE])
-            fig.update_traces(marker_color=BLUE)
-            fig.update_layout(showlegend=False)
-        fig.update_layout(xaxis_tickangle=-40)
-        pc(fig, 250)
-
-    with col2:
-        section("Monthly Revenue")
-        mn = (o_cur.groupby(['Year', 'Month', 'Month Name'])['Sales']
-                   .sum().reset_index().sort_values(['Year', 'Month']))
-        mn['Period'] = mn['Month Name'] + ' ' + mn['Year'].astype(str)
-        if compare_on and not o_cmp.empty:
-            mn2 = (o_cmp.groupby(['Year', 'Month', 'Month Name'])['Sales']
-                       .sum().reset_index().sort_values(['Year', 'Month']))
-            mn2['Period'] = mn2['Month Name'] + ' ' + mn2['Year'].astype(str)
-            mn['Type'] = 'Current'; mn2['Type'] = 'Previous'
-            fig = px.bar(pd.concat([mn, mn2]), x='Period', y='Sales', color='Type',
-                         barmode='group',
-                         color_discrete_map={'Current': BLUE, 'Previous': GRAY},
-                         text_auto='.2s')
-            fig.update_layout(legend=dict(orientation='h', y=1.12, x=0,
-                                          bgcolor='rgba(0,0,0,0)'))
-        else:
-            fig = px.bar(mn, x='Period', y='Sales', text_auto='.2s',
-                         color_discrete_sequence=[BLUE])
-            fig.update_traces(marker_color=BLUE)
-            fig.update_layout(showlegend=False)
-        fig.update_layout(xaxis_tickangle=-20)
-        pc(fig, 250)
-
-    section("Revenue by Aggregator & Brand")
-    d1, d2 = st.columns([1, 1.8])
-    with d1:
-        pv = o_cur.groupby('Provider')['Sales'].sum().reset_index()
-        fig = px.pie(pv, values='Sales', names='Provider', hole=0.52,
-                     color_discrete_sequence=PAL)
-        fig.update_traces(textposition='outside', textinfo='percent+label', textfont_size=10)
-        fig.update_layout(showlegend=False)
-        pc(fig, 270)
-    with d2:
-        section("Brand Revenue — click any column header to sort ↕")
-        bb = (o_cur.groupby('Brand')
-                   .agg(Revenue=('Sales', 'sum'), Orders=('Order ID', 'nunique'),
-                        AOV=('Sales', 'mean'))
-                   .reset_index().sort_values('Revenue', ascending=False).reset_index(drop=True))
-        if compare_on and not o_cmp.empty:
-            bc2 = o_cmp.groupby('Brand')['Sales'].sum().reset_index(name='Rev_Prev')
-            bb = bb.merge(bc2, on='Brand', how='left').fillna(0)
-            bb['Diff']   = (bb['Revenue'] - bb['Rev_Prev']).round(0)
-            bb['Growth'] = bb.apply(lambda r: pct(r['Revenue'], r['Rev_Prev']), axis=1)
-            disp = bb[['Brand', 'Revenue', 'Rev_Prev', 'Diff', 'Growth',
-                        'Orders', 'AOV']].copy()
-            disp.columns = ['Brand', 'Revenue (SAR)', 'Prev Revenue (SAR)',
-                            'Diff (SAR)', 'Growth %', 'Orders', 'AOV (SAR)']
-            styled = disp.style.applymap(color_growth, subset=['Growth %'])
-        else:
-            disp = bb[['Brand', 'Revenue', 'Orders', 'AOV']].copy()
-            disp.columns = ['Brand', 'Revenue (SAR)', 'Orders', 'AOV (SAR)']
-            styled = disp.style
-        st.dataframe(
-            styled.format({
-                col: "{:,.0f}" for col in disp.columns
-                if 'SAR' in col or col == 'Orders'
-            } | ({} if not compare_on else {"Growth %": "{:+.1f}"})),
-            use_container_width=True, hide_index=True,
-        )
-
-    # ── Export (outside columns)
-    export_cols = ['Order ID', 'Date', 'Brand', 'Provider', 'Technology',
-                   'Location', 'Status', 'Sales', 'Discount']
-    daily_export = norm(o_cur).groupby('Date').agg(
-        Revenue=('Sales', 'sum'), Discount=('Discount', 'sum'),
-        Orders=('Order ID', 'nunique')).reset_index()
-    export_button("Revenue_Sales", {
-        "Brand Revenue":    disp.reset_index(drop=True),
-        "Daily Revenue":    daily_export,
-        "Filtered Orders":  o_cur[[c for c in export_cols if c in o_cur.columns]],
-    })
-    st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TAB 4 — ITEMS
-# ─────────────────────────────────────────────────────────────────────────────
-with t4:
-    if i_cur.empty:
-        st.warning("No item data for this selection.")
-    else:
-        st.markdown("<div style='height:.4rem'></div>", unsafe_allow_html=True)
-
-        top_item = i_cur.groupby('Items')['Quantity'].sum().idxmax()
-        top_qty  = int(i_cur.groupby('Items')['Quantity'].sum().max())
-        cmp_top  = (int(i_cmp.groupby('Items')['Quantity'].sum()
-                       .get(top_item, 0)) if compare_on and not i_cmp.empty else 0)
-        tot_qty  = int(i_cur['Quantity'].sum())
-        cmp_qty2 = (int(i_cmp['Quantity'].sum())
-                    if compare_on and not i_cmp.empty else 0)
-
-        k1, k2, k3, k4 = st.columns(4)
-        kpi_card(k1, "Unique Items",      f"{i_cur['Items'].nunique():,}",
-                 None, "—", BLUE, "🗂️")
-        kpi_card(k2, "Total Units Sold",  f"{tot_qty:,}",
-                 pct(tot_qty, cmp_qty2), f"{cmp_qty2:,}", GREEN, "📦")
-        kpi_card(k3, "Best Seller",
-                 (top_item[:18] + "…") if len(top_item) > 18 else top_item,
-                 None, "—", AMBER, "🏆")
-        kpi_card(k4, "Best Seller Units", f"{top_qty:,}",
-                 pct(top_qty, cmp_top) if compare_on else None,
-                 f"{cmp_top:,}", PURPLE, "⭐")
-
-        st.markdown("<div style='height:.4rem'></div>", unsafe_allow_html=True)
-
-        section("Top 15 Items by Quantity Sold")
-        t15 = (i_cur.groupby('Items')['Quantity']
-                    .sum().sort_values(ascending=False).head(15).reset_index())
-
-        if compare_on and not i_cmp.empty:
-            t15c = i_cmp.groupby('Items')['Quantity'].sum().reset_index(name='Qty_cmp')
-            t15  = t15.merge(t15c, on='Items', how='left').fillna(0)
-            fig  = go.Figure()
-            fig.add_trace(go.Bar(
-                x=t15['Items'], y=t15['Quantity'], name='Current',
-                marker_color=BLUE, text=t15['Quantity'].astype(int),
-                textposition='outside',
-                hovertemplate="%{x}<br><b>%{y:,} units</b><extra>Current</extra>",
+        if compare_on and not o_old.empty:
+            old_trend = o_old.groupby('Date').agg(Sales=('Sales','sum'), Orders=('Order ID','count')).reset_index()
+            # Align previous period dates onto the current period's calendar so
+            # both lines sit on the same x-axis for visual comparison.
+            cmp_offset = pd.Timestamp(sd) - pd.Timestamp(cmp_s)
+            old_trend['Aligned Date'] = old_trend['Date'] + cmp_offset
+            fig.add_trace(go.Scatter(
+                x=old_trend['Aligned Date'], y=old_trend['Sales'],
+                name="Previous Revenue", mode='lines+markers',
+                line=dict(color=AMBER, width=2, dash='dash'),
+                hovertemplate="<b>%{x|%Y-%m-%d} (aligned)</b><br>Previous Revenue: %{y:,.2f} SAR<extra></extra>"
             ))
             fig.add_trace(go.Bar(
-                x=t15['Items'], y=t15['Qty_cmp'], name='Previous',
-                marker_color=GRAY, text=t15['Qty_cmp'].astype(int),
-                textposition='outside',
-                hovertemplate="%{x}<br><b>%{y:,} units</b><extra>Previous</extra>",
+                x=cur_trend['Date'], y=cur_trend['Orders'],
+                name="Current Orders", yaxis="y2", opacity=0.35, marker_color=BLUE,
+                hovertemplate="Current Orders: %{y}<extra></extra>"
             ))
-            fig.update_layout(barmode='group',
-                              legend=dict(orientation='h', y=1.12, x=0,
-                                          bgcolor='rgba(0,0,0,0)'),
-                              xaxis_tickangle=-35)
+            fig.add_trace(go.Bar(
+                x=old_trend['Aligned Date'], y=old_trend['Orders'],
+                name="Previous Orders", yaxis="y2", opacity=0.35, marker_color=AMBER,
+                hovertemplate="Previous Orders: %{y}<extra></extra>"
+            ))
         else:
-            fig = px.bar(t15, x='Items', y='Quantity',
-                         color_discrete_sequence=[BLUE], text_auto=True)
-            fig.update_traces(marker_color=BLUE)
-            fig.update_layout(xaxis_tickangle=-35, showlegend=False)
+            fig.add_trace(go.Bar(
+                x=cur_trend['Date'], y=cur_trend['Orders'],
+                name="Orders Count", yaxis="y2", opacity=0.3, marker_color=AMBER
+            ))
 
-        pc(fig, 310)
-
-        c1, c2 = st.columns(2)
-        with c1:
-            section("Item Trend — Top 6")
-            top6 = i_cur.groupby('Items')['Quantity'].sum().nlargest(6).index.tolist()
-            it   = (norm(i_cur[i_cur['Items'].isin(top6)])
-                        .groupby(['Date', 'Items'])['Quantity'].sum().reset_index())
-            if it['Date'].nunique() >= 2:
-                fig = px.line(it, x='Date', y='Quantity', color='Items',
-                              line_shape='spline', color_discrete_sequence=PAL)
-                fig.update_layout(legend=dict(orientation='h', y=1.12, x=0,
-                                              bgcolor='rgba(0,0,0,0)'),
-                                  legend_title_text='',
-                                  xaxis=dict(tickformat="%b %d"))
-                fig.update_traces(
-                    hovertemplate="%{x|%b %d}<br><b>%{y:,} units</b><extra>%{fullData.name}</extra>")
-                pc(fig, 270)
-            else:
-                st.info("Widen the date range to see item trends.")
-
-        with c2:
-            section("Top 10 Items by Aggregator")
-            top10i = i_cur.groupby('Items')['Quantity'].sum().nlargest(10).index
-            ib = (i_cur[i_cur['Items'].isin(top10i)]
-                     .groupby(['Items', 'Provider'])['Quantity'].sum().reset_index())
-            fig = px.bar(ib, x='Items', y='Quantity', color='Provider',
-                         barmode='stack', color_discrete_sequence=PAL)
-            fig.update_layout(xaxis_tickangle=-35, legend_title_text='',
-                              legend=dict(orientation='h', y=1.12, x=0,
-                                          bgcolor='rgba(0,0,0,0)'))
-            pc(fig, 270)
-
-        section("Full Item Table (Top 50) — click any column header to sort ↕")
-        has_amount = 'Total Amount' in i_cur.columns
-        full_agg = {'Qty': ('Quantity', 'sum'), 'Orders': ('Order ID', 'nunique')}
-        if has_amount:
-            full_agg['Revenue'] = ('Total Amount', 'sum')
-        full = (i_cur.groupby('Items').agg(**full_agg)
-                     .reset_index().sort_values('Qty', ascending=False)
-                     .head(50).reset_index(drop=True))
-
-        if compare_on and not i_cmp.empty:
-            cmp_agg = {'Qty_Prev': ('Quantity', 'sum')}
-            if has_amount:
-                cmp_agg['Rev_Prev'] = ('Total Amount', 'sum')
-            fc2 = i_cmp.groupby('Items').agg(**cmp_agg).reset_index()
-            full = full.merge(fc2, on='Items', how='left').fillna(0)
-            full['Qty Diff']   = (full['Qty'] - full['Qty_Prev']).astype(int)
-            full['Qty Growth'] = full.apply(lambda r: pct(r['Qty'], r['Qty_Prev']), axis=1)
-            if has_amount:
-                full['Rev Diff']   = (full['Revenue'] - full['Rev_Prev']).round(0)
-                full['Rev Growth'] = full.apply(
-                    lambda r: pct(r['Revenue'], r['Rev_Prev']), axis=1)
-
-            base_cols  = ['Items', 'Qty', 'Qty_Prev', 'Qty Diff', 'Qty Growth', 'Orders']
-            base_names = ['Item', 'Current Units', 'Prev Units', 'Unit Diff',
-                          'Qty Growth %', 'Orders']
-            if has_amount:
-                base_cols  += ['Revenue', 'Rev_Prev', 'Rev Diff', 'Rev Growth']
-                base_names += ['Revenue (SAR)', 'Prev Revenue (SAR)',
-                               'Rev Diff (SAR)', 'Rev Growth %']
-            disp = full[base_cols].copy(); disp.columns = base_names
-            grw = [c for c in disp.columns if 'Growth' in c]
-            styled = disp.style.applymap(color_growth, subset=grw)
-        else:
-            base_cols  = ['Items', 'Qty', 'Orders']
-            base_names = ['Item', 'Units Sold', 'Orders']
-            if has_amount:
-                base_cols  += ['Revenue']
-                base_names += ['Revenue (SAR)']
-            disp = full[base_cols].copy(); disp.columns = base_names
-            styled = disp.style
-
-        st.dataframe(
-            styled.format({
-                col: "{:,.0f}" for col in disp.columns
-                if any(x in col for x in ('Units', 'Orders', 'SAR', 'Diff'))
-                and 'Growth' not in col
-            } | ({k: "{:+.1f}" for k in [c for c in disp.columns if 'Growth' in c]}
-                 if compare_on else {})),
-            use_container_width=True, hide_index=True,
+        fig.update_layout(
+            template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            yaxis=dict(title=dict(text="Revenue (SAR)", font=dict(color=BLUE)), tickfont=dict(color=BLUE)),
+            yaxis2=dict(title=dict(text="Orders Count", font=dict(color=AMBER)), tickfont=dict(color=AMBER), overlaying="y", side="right"),
+            margin=dict(l=20, r=20, t=30, b=20), height=400, showlegend=True,
+            hovermode="x unified",
+            barmode='group' if compare_on else 'overlay'
         )
+        st.plotly_chart(fig, use_container_width=True)
 
-        # ── Export
-        item_export_cols = ['Order ID', 'Date', 'Brand', 'Provider',
-                            'Technology', 'Status', 'Items', 'Quantity']
-        if 'Total Amount' in i_cur.columns:
-            item_export_cols.append('Total Amount')
-        export_button("Items", {
-            "Items Summary":   disp.reset_index(drop=True),
-            "Filtered Items":  i_cur[[c for c in item_export_cols if c in i_cur.columns]],
-        })
-        st.markdown("<div style='height:1.5rem'></div>", unsafe_allow_html=True)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TAB 5 — BRANCHES
-# ─────────────────────────────────────────────────────────────────────────────
-with t5:
-    st.markdown("<div style='height:.4rem'></div>", unsafe_allow_html=True)
-
-    branches_cur   = o_cur['Location'].nunique()
-    branches_cmp   = o_cmp['Location'].nunique() if compare_on and not o_cmp.empty else 0
-    top_branch_rev = o_cur.groupby('Location')['Sales'].sum().max() if not o_cur.empty else 0
-    top_branch_nm  = (o_cur.groupby('Location')['Sales'].sum().idxmax()
-                      if not o_cur.empty else "—")
-
-    k1, k2, k3, k4 = st.columns(4)
-    kpi_card(k1, "Active Branches",    f"{branches_cur:,}",
-             pct(branches_cur, branches_cmp) if compare_on else None,
-             f"{branches_cmp:,}", BLUE, "🏪")
-    kpi_card(k2, "Top Branch Revenue", f"SAR {top_branch_rev:,.0f}",
-             None, "—", GREEN, "🏆")
-    kpi_card(k3, "Top Branch",
-             (top_branch_nm[:18] + "…") if len(str(top_branch_nm)) > 18
-             else str(top_branch_nm),
-             None, "—", AMBER, "📍")
-    kpi_card(k4, "Overall Fill Rate",  f"{cur['fill_rate']:.1f}%",
-             pct(cur['fill_rate'], cmp_data['fill_rate']) if compare_on else None,
-             f"{cmp_data['fill_rate']:.1f}%", PURPLE, "📊")
-
-    st.markdown("<div style='height:.4rem'></div>", unsafe_allow_html=True)
-
-    section("Revenue by Branch (Top 20)")
-    br_rev = (o_cur.groupby('Location')['Sales'].sum()
-                   .sort_values(ascending=False).head(20).reset_index())
-    fig = px.bar(br_rev, x='Sales', y='Location', orientation='h',
-                 text_auto='.2s', color_discrete_sequence=[BLUE])
-    fig.update_traces(marker_color=BLUE, textfont_size=10)
-    fig.update_layout(showlegend=False, yaxis=dict(categoryorder='total ascending'))
-    pc(fig, max(280, len(br_rev) * 24))
-
-    section("Branch Performance — click any column header to sort ↕")
-    br = (o_cur.groupby('Location').agg(
-            Revenue=('Sales', 'sum'),
-            Orders=('Order ID', 'nunique'),
-            AOV=('Sales', 'mean'),
-            Discount=('Discount', 'sum'),
-            Completed=('Status', lambda x: (x == 'Completed').sum()),
-            Rejected=('Status', lambda x: x.isin(REJECTED_STATUSES).sum()),
-          ).reset_index().sort_values('Revenue', ascending=False).reset_index(drop=True))
-    br['Fill Rate %'] = (br['Completed'] / br['Orders'] * 100).round(1)
-    br['Rank']        = range(1, len(br) + 1)
-
-    if compare_on and not o_cmp.empty:
-        bc2 = (o_cmp.groupby('Location').agg(
-                Rev_Prev=('Sales', 'sum'),
-                Ord_Prev=('Order ID', 'nunique'),
-                Comp_Prev=('Status', lambda x: (x == 'Completed').sum()),
-                Rej_Prev=('Status', lambda x: x.isin(REJECTED_STATUSES).sum()),
-               ).reset_index())
-        br = br.merge(bc2, on='Location', how='left').fillna(0)
-        br['Rev Diff']   = (br['Revenue'] - br['Rev_Prev']).round(0)
-        br['Rev Growth'] = br.apply(lambda r: pct(r['Revenue'], r['Rev_Prev']), axis=1)
-        br['Ord Growth'] = br.apply(lambda r: pct(r['Orders'],  r['Ord_Prev']),  axis=1)
-        br['Fr_Prev']    = (br['Comp_Prev'] / br['Ord_Prev'].replace(0, 1) * 100).round(1)
-        disp = br[['Rank', 'Location', 'Revenue', 'Rev_Prev', 'Rev Diff', 'Rev Growth',
-                   'Orders', 'Ord_Prev', 'Ord Growth',
-                   'Completed', 'Rejected', 'Fill Rate %', 'Fr_Prev', 'AOV']].copy()
-        disp.columns = ['#', 'Branch', 'Revenue (SAR)', 'Prev Revenue (SAR)',
-                        'Diff (SAR)', 'Rev Growth %',
-                        'Orders', 'Prev Orders', 'Ord Growth %',
-                        'Completed', 'Rejected', 'Fill Rate %', 'Prev Fill Rate %',
-                        'AOV (SAR)']
-        grw = ['Rev Growth %', 'Ord Growth %']
-        styled = disp.style.applymap(color_growth, subset=grw)
+        if compare_on:
+            st.caption("Previous period dates are aligned onto the current period's calendar so the lines overlay directly. Hover any point for exact values.")
     else:
-        disp = br[['Rank', 'Location', 'Revenue', 'Orders', 'AOV',
-                   'Completed', 'Rejected', 'Fill Rate %', 'Discount']].copy()
-        disp.columns = ['#', 'Branch', 'Revenue (SAR)', 'Orders', 'AOV (SAR)',
-                        'Completed', 'Rejected', 'Fill Rate %', 'Discount (SAR)']
-        styled = disp.style
+        st.info("No timeline data found for current filters.")
 
-    st.dataframe(
-        styled.format({
-            col: "{:,.0f}" for col in disp.columns
-            if any(x in col for x in ('SAR', 'Orders', 'Completed', 'Rejected',
-                                       'Prev Orders'))
-        } | {"Fill Rate %": "{:.1f}%", "Prev Fill Rate %": "{:.1f}%",
-             **({k: "{:+.1f}" for k in ['Rev Growth %', 'Ord Growth %']}
-                if compare_on else {})}),
-        use_container_width=True, hide_index=True,
-    )
+# ── Orders tab
+with tab_orders:
+    st.markdown("### 📦 Order Operations")
+    if not o_cur.empty:
+        # Daily orders by status
+        daily = o_cur.groupby(['Date','Status'])['Order ID'].count().reset_index()
+        daily.columns = ['Date','Status','Orders']
+        fig_o = px.bar(daily, x='Date', y='Orders', color='Status', barmode='stack',
+                       color_discrete_map={'Completed': GREEN, 'Canceled': RED, 'Cancelled': RED},
+                       template="plotly_dark", title=None)
+        fig_o.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                            height=320, margin=dict(t=20, b=20), hovermode='x unified')
+        st.plotly_chart(fig_o, use_container_width=True)
 
-    # Top 10 / Bottom 10
-    n_branches = len(br)
-    if n_branches >= 2:
-        st.markdown("<div style='height:.5rem'></div>", unsafe_allow_html=True)
-        col_top, col_bot = st.columns(2)
+        # AOV trend
+        aov_df = o_cur.groupby('Date').agg(Sales=('Sales','sum'), Orders=('Order ID','count')).reset_index()
+        aov_df['AOV'] = aov_df['Sales'] / aov_df['Orders'].replace(0, pd.NA)
+        fig_a = go.Figure()
+        fig_a.add_trace(go.Scatter(
+            x=aov_df['Date'], y=aov_df['AOV'], mode='lines+markers',
+            name="AOV", line=dict(color=PURPLE, width=2),
+            hovertemplate="<b>%{x|%Y-%m-%d}</b><br>AOV: %{y:,.2f} SAR<extra></extra>"
+        ))
+        fig_a.update_layout(
+            template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            yaxis=dict(title="Average Order Value (SAR)"),
+            height=280, margin=dict(t=20, b=20), showlegend=False
+        )
+        st.markdown("#### Daily Average Order Value (AOV)")
+        st.plotly_chart(fig_a, use_container_width=True)
 
-        for side, label, rows, bg in [
-            (col_top, "🏆 Top 10 Branches",    br.head(min(10, n_branches)),
-             'rgba(34,197,94,0.07)'),
-            (col_bot, "⚠️ Bottom 10 Branches", br.tail(min(10, n_branches))
-             .sort_values('Revenue', ascending=True).reset_index(drop=True),
-             'rgba(239,68,68,0.07)'),
-        ]:
-            with side:
-                section(label)
-                if compare_on and not o_cmp.empty:
-                    t_disp = rows[['Location', 'Revenue', 'Rev_Prev',
-                                   'Rev Growth', 'Fill Rate %']].copy()
-                    t_disp.columns = ['Branch', 'Revenue (SAR)', 'Prev Revenue (SAR)',
-                                      'Growth %', 'Fill Rate %']
-                    t_styled = t_disp.style.applymap(color_growth, subset=['Growth %'])
-                    t_styled = t_styled.applymap(
-                        lambda _: f'background-color: {bg}', subset=['Branch'])
-                else:
-                    t_disp = rows[['Location', 'Revenue', 'Orders', 'Fill Rate %']].copy()
-                    t_disp.columns = ['Branch', 'Revenue (SAR)', 'Orders', 'Fill Rate %']
-                    t_styled = t_disp.style.applymap(
-                        lambda _: f'background-color: {bg}', subset=['Branch'])
+        st.markdown("#### Raw Filtered Orders")
+        st.dataframe(
+            o_cur,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Sales":    st.column_config.NumberColumn("Sales (SAR)",    format="%.2f"),
+                "Discount": st.column_config.NumberColumn("Discount (SAR)", format="%.2f"),
+                "Date":     st.column_config.DateColumn("Order Date", format="YYYY-MM-DD"),
+            }
+        )
+    else:
+        st.info("No order data found for current filters.")
 
-                st.dataframe(
-                    t_styled.format({
-                        col: "{:,.0f}" for col in t_disp.columns
-                        if 'SAR' in col or col == 'Orders'
-                    } | {"Fill Rate %": "{:.1f}%",
-                         **({} if not compare_on else {"Growth %": "{:+.1f}"})}),
-                    use_container_width=True, hide_index=True,
-                )
+# ── Items tab
+with tab_items:
+    st.markdown("### 🛒 Item Performance")
+    if not i_cur.empty:
+        cur_items = i_cur.groupby('Items').agg(Sales=('Total Amount','sum'), Qty=('Quantity','sum')).reset_index()
+        cur_items.columns = ['Item', 'Current Sales', 'Current Qty']
 
-    # ── Export
-    export_cols = ['Order ID', 'Date', 'Brand', 'Provider', 'Technology',
-                   'Location', 'Status', 'Sales', 'Discount']
-    export_button("Branches", {
-        "Branch Performance": disp.reset_index(drop=True),
-        "Filtered Orders":    o_cur[[c for c in export_cols if c in o_cur.columns]],
-    })
-    st.markdown("<div style='height:1.5rem'></div>", unsafe_allow_html=True)
+        if compare_on and not i_old.empty:
+            old_items = i_old.groupby('Items').agg(Sales=('Total Amount','sum'), Qty=('Quantity','sum')).reset_index()
+            old_items.columns = ['Item', 'Previous Sales', 'Previous Qty']
+            items_df = cur_items.merge(old_items, on='Item', how='outer').fillna(0)
+            items_df['Difference'] = items_df['Current Sales'] - items_df['Previous Sales']
+            items_df['Growth %'] = ((items_df['Current Sales'] - items_df['Previous Sales']) /
+                                    items_df['Previous Sales'].replace(0, pd.NA)) * 100
+            items_df = items_df.sort_values('Current Sales', ascending=False).reset_index(drop=True)
+            cfg = {
+                "Current Sales":  st.column_config.NumberColumn("Current Sales (SAR)",  format="%.2f"),
+                "Previous Sales": st.column_config.NumberColumn("Previous Sales (SAR)", format="%.2f"),
+                "Difference":     st.column_config.NumberColumn("Difference (SAR)",     format="%.2f"),
+                "Growth %":       st.column_config.NumberColumn("Growth %",             format="%.1f%%"),
+                "Current Qty":    st.column_config.NumberColumn("Current Qty"),
+                "Previous Qty":   st.column_config.NumberColumn("Previous Qty"),
+            }
+        else:
+            items_df = cur_items.sort_values('Current Sales', ascending=False).reset_index(drop=True)
+            cfg = {
+                "Current Sales": st.column_config.NumberColumn("Sales (SAR)", format="%.2f"),
+                "Current Qty":   st.column_config.NumberColumn("Quantity"),
+            }
+
+        # Top 10 chart
+        top10 = items_df.head(10)
+        fig_i = px.bar(top10, x='Current Sales', y='Item', orientation='h',
+                       color_discrete_sequence=[BLUE], template="plotly_dark", text='Current Sales')
+        fig_i.update_traces(texttemplate='%{text:,.0f}', textposition='outside')
+        fig_i.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                            height=420, margin=dict(t=20, b=20),
+                            yaxis=dict(autorange="reversed"), showlegend=False)
+        st.markdown("#### Top 10 Items by Sales")
+        st.plotly_chart(fig_i, use_container_width=True)
+
+        st.markdown("#### Full Items Breakdown")
+        st.dataframe(items_df, use_container_width=True, hide_index=True, column_config=cfg)
+    else:
+        st.info("No item data found for current filters.")
+
+# ── Branches tab (full spec + Top10/Bottom10 highlight)
+with tab_branches:
+    st.markdown("### 📍 Sales by Branch")
+    if not o_cur.empty:
+        # Current period: sales + total orders per branch
+        cur_b = o_cur.groupby('Location').agg(
+            Sales=('Sales','sum'),
+            Orders=('Order ID','count'),
+        ).reset_index()
+        cur_b.columns = ['Branch', 'Current Sales', 'Total Orders']
+
+        # Status-unfiltered slice for accurate Completed / Rejected / Fill Rate
+        b_total = o_cur_fr.groupby('Location').size().rename('TotalFR').reset_index()
+        b_total.columns = ['Branch', 'TotalFR']
+        b_rej_g = (o_cur_fr[o_cur_fr['Status'].isin(REJECTED_STATUSES)]
+                   .groupby('Location').size().rename('Rejected').reset_index())
+        b_rej_g.columns = ['Branch', 'Rejected']
+
+        branches = cur_b.merge(b_total, on='Branch', how='left').merge(b_rej_g, on='Branch', how='left')
+        branches['Rejected']    = branches['Rejected'].fillna(0).astype(int)
+        branches['TotalFR']     = branches['TotalFR'].fillna(0).astype(int)
+        branches['Completed']   = (branches['TotalFR'] - branches['Rejected']).clip(lower=0).astype(int)
+        denom = (branches['Completed'] + branches['Rejected']).replace(0, pd.NA)
+        branches['Fill Rate %'] = (branches['Completed'] / denom * 100).fillna(100)
+        branches['AOV']         = branches['Current Sales'] / branches['Total Orders'].replace(0, pd.NA)
+
+        if compare_on and not o_old.empty:
+            old_b = o_old.groupby('Location').agg(Sales=('Sales','sum')).reset_index()
+            old_b.columns = ['Branch', 'Previous Sales']
+            branches = branches.merge(old_b, on='Branch', how='left')
+            branches['Previous Sales'] = branches['Previous Sales'].fillna(0)
+            branches['Sales Growth %'] = ((branches['Current Sales'] - branches['Previous Sales']) /
+                                          branches['Previous Sales'].replace(0, pd.NA)) * 100
+            cols_order = ['Branch','Current Sales','Previous Sales','Sales Growth %',
+                          'Total Orders','Completed','Rejected','Fill Rate %','AOV']
+        else:
+            cols_order = ['Branch','Current Sales','Total Orders','Completed','Rejected','Fill Rate %','AOV']
+
+        branches = branches.sort_values('Current Sales', ascending=False).reset_index(drop=True)
+        branches = branches[[c for c in cols_order if c in branches.columns]]
+
+        # Top-10 / Bottom-10 row highlight via pandas Styler. The styled
+        # DataFrame still supports st.dataframe's clickable header sorting.
+        def _highlight_topbot(df):
+            n = len(df)
+            styles = pd.DataFrame('', index=df.index, columns=df.columns)
+            if n == 0:
+                return styles
+            top_count = min(10, n)
+            # Don't overlap top and bottom when n is small
+            bot_count = min(10, max(0, n - top_count))
+            for i in range(top_count):
+                styles.iloc[i, :] = 'background-color: rgba(34,197,94,0.18)'
+            for i in range(n - bot_count, n):
+                if i >= top_count:
+                    styles.iloc[i, :] = 'background-color: rgba(239,68,68,0.18)'
+            return styles
+
+        fmt_map = {
+            'Current Sales':   '{:,.2f}',
+            'Previous Sales':  '{:,.2f}',
+            'Sales Growth %':  '{:+.1f}%',
+            'Total Orders':    '{:,}',
+            'Completed':       '{:,}',
+            'Rejected':        '{:,}',
+            'Fill Rate %':     '{:.1f}%',
+            'AOV':             '{:,.2f}',
+        }
+        fmt_apply = {k: v for k, v in fmt_map.items() if k in branches.columns}
+        styled = branches.style.apply(_highlight_topbot, axis=None).format(fmt_apply, na_rep='—')
+
+        st.dataframe(styled, use_container_width=True, hide_index=True,
+                     height=min(720, 60 + 35 * len(branches)))
+        st.caption("🟢 Top 10 branches by sales highlighted in green · 🔴 Bottom 10 in red · click any column header to re-sort.")
+    else:
+        st.info("No branch data found for current filters.")
+
+# ── Aggregators
+with tab_aggs:
+    st.markdown("### 🚚 Channel Delivery Aggregator Performance")
+    if not o_cur.empty:
+        agg_df = build_dim_comparison(o_cur, o_old, 'Provider', compare_on)
+        agg_df = agg_df.rename(columns={'Provider':'Aggregator'})
+
+        col_p, col_t = st.columns([1, 2])
+        with col_p:
+            pie_df = agg_df[['Aggregator','Current Sales']].copy()
+            fig_p = px.pie(pie_df, names='Aggregator', values='Current Sales',
+                           color_discrete_sequence=PAL, hole=0.4, template="plotly_dark")
+            fig_p.update_traces(textposition='inside', textinfo='percent+label')
+            fig_p.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                height=340, margin=dict(t=10, b=10, l=10, r=10),
+                                showlegend=False)
+            st.plotly_chart(fig_p, use_container_width=True)
+        with col_t:
+            cfg = comparison_column_config(compare_on)
+            cfg["Aggregator"] = st.column_config.TextColumn("Aggregator")
+            st.dataframe(agg_df, use_container_width=True, hide_index=True, column_config=cfg)
+    else:
+        st.info("No aggregator data found for current filters.")
+
+# ── Brands
+with tab_brands:
+    st.markdown("### 🏷️ Brand Performance")
+    if not o_cur.empty:
+        brand_df = build_dim_comparison(o_cur, o_old, 'Brand', compare_on)
+
+        fig_b = px.bar(brand_df, x='Brand', y='Current Sales', color='Brand', text_auto='.2s',
+                       color_discrete_sequence=PAL, template="plotly_dark")
+        fig_b.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                            height=360, margin=dict(t=20, b=20), showlegend=False)
+        st.plotly_chart(fig_b, use_container_width=True)
+
+        cfg = comparison_column_config(compare_on)
+        cfg["Brand"] = st.column_config.TextColumn("Brand")
+        st.dataframe(brand_df, use_container_width=True, hide_index=True, column_config=cfg)
+    else:
+        st.info("No brand data found for current filters.")
+
+# ── Technologies
+with tab_tech:
+    st.markdown("### ⚙️ Order Management Technology")
+    if not o_cur.empty:
+        tech_df = build_dim_comparison(o_cur, o_old, 'Technology', compare_on)
+
+        fig_t = px.bar(tech_df, y='Technology', x='Current Sales', orientation='h', color='Technology',
+                       color_discrete_sequence=PAL, template="plotly_dark")
+        fig_t.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                            height=300, margin=dict(t=20, b=20), showlegend=False)
+        st.plotly_chart(fig_t, use_container_width=True)
+
+        cfg = comparison_column_config(compare_on)
+        cfg["Technology"] = st.column_config.TextColumn("Technology")
+        st.dataframe(tech_df, use_container_width=True, hide_index=True, column_config=cfg)
+    else:
+        st.info("No technology data found for current filters.")
