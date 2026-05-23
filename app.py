@@ -144,12 +144,14 @@ def process(file_bytes):
 @st.cache_data(ttl=3600, show_spinner="📥 Downloading latest data from Google Drive…")
 def _load_from_drive(file_id: str) -> bytes:
     """Download the Excel file from Google Drive and return its raw bytes.
-    Uses gdown to handle Google's virus-scan confirmation page for larger files."""
+    Uses gdown's URL-based form so this works on every gdown version
+    (older releases do not accept the `id=` or `fuzzy=` keyword arguments)."""
     import gdown, tempfile, os
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".xlsx")
     os.close(tmp_fd)
     try:
-        out = gdown.download(id=file_id, output=tmp_path, quiet=True, fuzzy=True)
+        url = f"https://drive.google.com/uc?id={file_id}"
+        out = gdown.download(url, output=tmp_path, quiet=True)
         if not out or not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
             raise RuntimeError(
                 "Google Drive returned an empty response. Double-check the file ID "
