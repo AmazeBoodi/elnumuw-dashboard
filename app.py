@@ -25,10 +25,18 @@ def _check_password():
     with col1:
         login_clicked = st.button("Log in", type="primary")
     if login_clicked:
-        expected = st.secrets.get("APP_PASSWORD", None)
-        if expected is None:
-            st.error("⚠️ APP_PASSWORD is not configured in Streamlit secrets. "
-                     "Add it under App settings → Secrets.")
+        # st.secrets throws StreamlitSecretNotFoundError when no secrets file
+        # exists at all, so we guard with try/except rather than relying on .get().
+        try:
+            expected = st.secrets.get("APP_PASSWORD", None)
+        except Exception:
+            expected = None
+        if not expected:
+            st.error(
+                "⚠️ APP_PASSWORD is not configured.  \n"
+                "Create `.streamlit/secrets.toml` in the project folder and add:  \n"
+                "`APP_PASSWORD = \"your-password\"`"
+            )
             return False
         if pw == expected:
             st.session_state["password_correct"] = True
@@ -190,7 +198,10 @@ try:
         st.caption("📎 Using manually-uploaded file (override active).")
         file_bytes = uploaded.read()
     else:
-        drive_file_id = st.secrets.get("DRIVE_FILE_ID", None)
+        try:
+            drive_file_id = st.secrets.get("DRIVE_FILE_ID", None)
+        except Exception:
+            drive_file_id = None
         if not drive_file_id:
             st.error(
                 "⚠️ DRIVE_FILE_ID is not configured in Streamlit secrets. "
@@ -784,8 +795,8 @@ def render_dim_tab(df_raw, dim_label, compare_on, tab_key, extra_charts_fn=None)
 # TABS
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("<br>", unsafe_allow_html=True)
-tab_summary, tab_orders, tab_lost, tab_items, tab_branches, tab_aggs, tab_brands, tab_tech, tab_time, tab_monthly, tab_matrix, tab_branch_drill = st.tabs(
-    ["📊 Summary", "📦 Orders", "🚫 Lost Orders", "🛒 Items", "📍 Branches", "🚚 Aggregators", "🏷️ Brands", "⚙️ Technologies", "⏰ Time Analysis", "📅 Monthly Trends", "🔀 Brand × Aggregator", "🔍 Branch Drill-Down"]
+tab_summary, tab_orders, tab_lost, tab_items, tab_branches, tab_aggs, tab_brands, tab_tech, tab_time, tab_monthly, tab_matrix, tab_branch_drill, tab_ai = st.tabs(
+    ["📊 Summary", "📦 Orders", "🚫 Lost Orders", "🛒 Items", "📍 Branches", "🚚 Aggregators", "🏷️ Brands", "⚙️ Technologies", "⏰ Time Analysis", "📅 Monthly Trends", "🔀 Brand × Aggregator", "🔍 Branch Drill-Down", "💬 Ask AI Analyst"]
 )
 
 # ── Summary timeline with current vs previous overlay
@@ -2644,3 +2655,369 @@ with tab_branch_drill:
                 "Date":     st.column_config.DateColumn("Date",             format="YYYY-MM-DD"),
             },
         )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 💬 ASK AI ANALYST TAB
+# Conversational RAG console powered by Google Gemini (free tier).
+# Context is rebuilt from the live filtered dataframes on every message so the
+# model always reasons over the exact data slice the user is currently viewing.
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_ai:
+    st.markdown("### 💬 Ask AI Analyst")
+    st.caption(
+        "Chat with your **live filtered data** using Groq AI. "
+        "Every answer is grounded in the exact data slice you are currently viewing — "
+        "switch filters on any tab and come back here to ask questions about the updated numbers."
+    )
+
+    # ── Resolve API key: secrets file takes priority over manual input ────────
+    # If GEMINI_API_KEY is set in .streamlit/secrets.toml (or Streamlit Cloud
+    # secrets), it is used silently for every visitor — no input field shown.
+    # Only when the key is absent from secrets does the manual input field appear.
+    try:
+        _secrets_ai_key = st.secrets.get("GROQ_API_KEY", None)
+    except Exception:
+        _secrets_ai_key = None
+
+    if _secrets_ai_key:
+        ai_key = _secrets_ai_key          # pre-configured: invisible to visitors
+    else:
+        ai_key = st.text_input(
+            "🔑 Gemini API Key",
+            type="password",
+            placeholder="Paste your free key from aistudio.google.com …",
+            key="gemini_api_key",
+            help="Used only for this browser session. Never stored or sent anywhere except Google's API.",
+        )
+        if not ai_key:
+            st.info(
+                "**Get a free Groq API key in under a minute:**\n\n"
+                "1. Go to **[console.groq.com](https://console.groq.com)** and sign up free.\n"
+                "2. Click **API Keys → Create API Key** and copy it.\n"
+                "3. Paste it above — or add `GROQ_API_KEY = \"...\"` to `.streamlit/secrets.toml` "
+                "to enable it for all users automatically.\n\n"
+                "Groq is completely free, works worldwide, and is faster than Gemini."
+            )
+
+    if ai_key:
+        # ── Session state initialisation ──────────────────────────────────────
+        if "chat_history" not in st.session_state:
+            st.session_state.chat_history = []   # [{role, content}, ...]
+
+        # ── Render all previous turns ─────────────────────────────────────────
+        for _msg in st.session_state.chat_history:
+            with st.chat_message(_msg["role"]):
+                st.markdown(_msg["content"])
+
+        # ── Capture new user input ────────────────────────────────────────────
+        _user_input = st.chat_input(
+            "Ask anything about your data — e.g. 'Which brand had the highest cancellation rate?'"
+        )
+
+        if _user_input:
+            # Display the user bubble immediately
+            with st.chat_message("user"):
+                st.markdown(_user_input)
+            st.session_state.chat_history.append({"role": "user", "content": _user_input})
+
+            # ── Build comprehensive live data context ─────────────────────────
+            _ai_orders   = len(o_cur)
+            _ai_revenue  = float(o_cur["Sales"].sum())   if "Sales"    in o_cur.columns else 0.0
+            _ai_aov      = _ai_revenue / _ai_orders      if _ai_orders > 0 else 0.0
+            _ai_discount = float(o_cur["Discount"].sum()) if "Discount" in o_cur.columns else 0.0
+            _ai_item_units = int(i_cur["Quantity"].sum()) if not i_cur.empty and "Quantity" in i_cur.columns else 0
+            _ai_item_rev   = float(i_cur["Total Amount"].sum()) if not i_cur.empty and "Total Amount" in i_cur.columns else 0.0
+            _ai_status_bkd = o_cur["Status"].value_counts().to_dict() if "Status" in o_cur.columns else {}
+            _ai_cancel_rate = (
+                _ai_status_bkd.get("Canceled", 0) + _ai_status_bkd.get("Cancelled", 0)
+            ) / max(_ai_orders, 1) * 100
+            _ai_completed = _ai_status_bkd.get("Completed", 0)
+            _ai_in_prog   = _ai_status_bkd.get("In Progress", 0)
+            _ai_cancelled = _ai_status_bkd.get("Canceled", 0) + _ai_status_bkd.get("Cancelled", 0)
+            _ai_fill_rate = _ai_completed / max(_ai_completed + _ai_cancelled, 1) * 100
+
+            # Helper: compute per-group metrics from o_cur_fr
+            def _dim_table(col):
+                if col not in o_cur_fr.columns: return pd.DataFrame()
+                _g = o_cur_fr.groupby(col)
+                _rev  = o_cur[o_cur[col].notna()].groupby(col)["Sales"].sum() if "Sales" in o_cur.columns else pd.Series(dtype=float)
+                _ord  = _g.size()
+                _comp = _g["Status"].apply(lambda s: (s == "Completed").sum())
+                _canc = _g["Status"].apply(lambda s: s.isin(REJECTED_STATUSES).sum())
+                _inp  = _g["Status"].apply(lambda s: s.isin(IN_PROGRESS_STATUSES).sum())
+                _fr   = (_comp / (_comp + _canc).where((_comp + _canc) > 0) * 100).round(1)
+                _cr   = (_canc / _ord.where(_ord > 0) * 100).round(1)
+                _aov  = (_rev  / _ord.where(_ord > 0)).round(0)
+                return pd.DataFrame({
+                    "Orders": _ord, "Revenue SAR": _rev.round(0),
+                    "AOV SAR": _aov, "Completed": _comp,
+                    "Cancelled": _canc, "In Progress": _inp,
+                    "Fill Rate %": _fr, "Cancel Rate %": _cr,
+                }).sort_values("Revenue SAR", ascending=False)
+
+            _brand_tbl = _dim_table("Brand")
+            _loc_tbl   = _dim_table("Location")
+            _prov_tbl  = _dim_table("Provider")
+            _tech_tbl  = _dim_table("Technology")
+
+            # Top menu items
+            _ai_top_items = (
+                i_cur.groupby("Items")["Total Amount"].sum()
+                .sort_values(ascending=False).head(10)
+                if not i_cur.empty and "Items" in i_cur.columns and "Total Amount" in i_cur.columns
+                else pd.Series(dtype=float)
+            )
+            _ai_top_items_qty = (
+                i_cur.groupby("Items")["Quantity"].sum()
+                .sort_values(ascending=False).head(10)
+                if not i_cur.empty and "Items" in i_cur.columns and "Quantity" in i_cur.columns
+                else pd.Series(dtype=float)
+            )
+
+            def _tbl_to_text(df, max_rows=20):
+                if df.empty: return "  No data"
+                lines = []
+                for name, row in df.head(max_rows).iterrows():
+                    parts = []
+                    for col, val in row.items():
+                        if pd.isna(val): continue
+                        if "SAR" in col or col == "Revenue":
+                            parts.append(f"{col}: {val:,.0f} SAR")
+                        elif "%" in col:
+                            parts.append(f"{col}: {val:.1f}%")
+                        else:
+                            parts.append(f"{col}: {val:,.0f}" if isinstance(val, float) else f"{col}: {val:,}")
+                    lines.append(f"  {name}: " + " | ".join(parts))
+                return "\n".join(lines)
+
+            # ── Advanced analytics for richer AI context ──────────────────────
+
+            # Revenue concentration — top 3 brands share of total
+            _rev_total = _brand_tbl["Revenue SAR"].sum() if not _brand_tbl.empty else 1
+            _top3_rev  = _brand_tbl["Revenue SAR"].head(3).sum() if not _brand_tbl.empty else 0
+            _top3_pct  = _top3_rev / max(_rev_total, 1) * 100
+
+            # Best / worst performers per dimension
+            def _best_worst(df, metric, label):
+                if df.empty or metric not in df.columns: return "N/A", "N/A"
+                valid = df[metric].dropna()
+                if valid.empty: return "N/A", "N/A"
+                return (f"{df[metric].idxmax()} ({df[metric].max():.1f}{label})",
+                        f"{df[metric].idxmin()} ({df[metric].min():.1f}{label})")
+
+            _brand_best_rev,  _brand_worst_rev   = _best_worst(_brand_tbl, "Revenue SAR",   " SAR")
+            _brand_best_fill, _brand_worst_fill  = _best_worst(_brand_tbl, "Fill Rate %",   "%")
+            _brand_best_cr,   _brand_worst_cr    = _best_worst(_brand_tbl, "Cancel Rate %", "%")
+            _brand_best_aov,  _brand_worst_aov   = _best_worst(_brand_tbl, "AOV SAR",       " SAR")
+            _loc_best_rev,    _loc_worst_rev     = _best_worst(_loc_tbl,   "Revenue SAR",   " SAR")
+            _loc_best_fill,   _loc_worst_fill    = _best_worst(_loc_tbl,   "Fill Rate %",   "%")
+            _loc_best_cr,     _loc_worst_cr      = _best_worst(_loc_tbl,   "Cancel Rate %", "%")
+            _prov_best_rev,   _prov_worst_rev    = _best_worst(_prov_tbl,  "Revenue SAR",   " SAR")
+            _prov_best_cr,    _prov_worst_cr     = _best_worst(_prov_tbl,  "Cancel Rate %", "%")
+
+            # Average benchmarks across brands / locations
+            _avg_brand_cr   = _brand_tbl["Cancel Rate %"].mean()  if not _brand_tbl.empty else 0
+            _avg_brand_fill = _brand_tbl["Fill Rate %"].mean()    if not _brand_tbl.empty else 0
+            _avg_brand_aov  = _brand_tbl["AOV SAR"].mean()        if not _brand_tbl.empty else 0
+            _avg_loc_cr     = _loc_tbl["Cancel Rate %"].mean()    if not _loc_tbl.empty  else 0
+            _avg_loc_fill   = _loc_tbl["Fill Rate %"].mean()      if not _loc_tbl.empty  else 0
+
+            # Brands/locations above-average cancel rate (risk flags)
+            _risky_brands = (
+                _brand_tbl[_brand_tbl["Cancel Rate %"] > _avg_brand_cr]["Cancel Rate %"]
+                .sort_values(ascending=False)
+                if not _brand_tbl.empty else pd.Series(dtype=float)
+            )
+            _risky_locs   = (
+                _loc_tbl[_loc_tbl["Cancel Rate %"] > _avg_loc_cr]["Cancel Rate %"]
+                .sort_values(ascending=False).head(5)
+                if not _loc_tbl.empty else pd.Series(dtype=float)
+            )
+
+            # Day-of-week order distribution
+            _dow_dist = ""
+            if "Date" in o_cur.columns:
+                _dow = o_cur.copy()
+                _dow["DOW"] = pd.to_datetime(_dow["Date"]).dt.day_name()
+                _dow_grp = _dow.groupby("DOW").agg(
+                    Orders=("Order ID","count"), Revenue=("Sales","sum")
+                ).reindex(["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]).dropna()
+                _dow_dist = "\n".join(
+                    f"  {d}: {int(r['Orders']):,} orders | {r['Revenue']:,.0f} SAR"
+                    for d, r in _dow_grp.iterrows()
+                )
+
+            # Monthly trend (last 6 months)
+            _monthly_trend = ""
+            if "Date" in o_cur.columns:
+                _mo = o_cur.copy()
+                _mo["Month"] = pd.to_datetime(_mo["Date"]).dt.strftime("%b %Y")
+                _mo["_sort"] = pd.to_datetime(_mo["Date"]).dt.to_period("M")
+                _mo_grp = (_mo.groupby(["Month","_sort"])
+                           .agg(Orders=("Order ID","count"), Revenue=("Sales","sum"))
+                           .reset_index().sort_values("_sort").tail(6))
+                _monthly_trend = "\n".join(
+                    f"  {r['Month']}: {int(r['Orders']):,} orders | {r['Revenue']:,.0f} SAR"
+                    for _, r in _mo_grp.iterrows()
+                )
+
+            _data_ctx = f"""ALNUMUW DASHBOARD — LIVE DATA SNAPSHOT
+Active filter slice only. All figures are pre-computed.
+
+DIMENSION DEFINITIONS (NEVER confuse these):
+  BRAND      = restaurant concept / chain name
+  BRANCH     = physical store / mall location
+  PROVIDER   = food delivery aggregator platform
+  TECHNOLOGY = POS / integration system
+
+━━ OVERALL KPIs ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Orders         : {_ai_orders:,}
+Revenue        : {_ai_revenue:,.0f} SAR
+AOV            : {_ai_aov:,.0f} SAR
+Discount       : {_ai_discount:,.0f} SAR
+Completed      : {_ai_completed:,}
+Cancelled      : {_ai_cancelled:,}
+In Progress    : {_ai_in_prog:,}
+Fill Rate      : {_ai_fill_rate:.1f}%
+Cancel Rate    : {_ai_cancel_rate:.1f}%
+Item Units     : {_ai_item_units:,}
+Items Revenue  : {_ai_item_rev:,.0f} SAR
+Revenue Concentration (top 3 brands): {_top3_pct:.1f}% of total
+
+━━ BENCHMARKS (averages across all active dimension members) ━━
+Avg Brand Cancel Rate : {_avg_brand_cr:.1f}%
+Avg Brand Fill Rate   : {_avg_brand_fill:.1f}%
+Avg Brand AOV         : {_avg_brand_aov:,.0f} SAR
+Avg Branch Cancel Rate: {_avg_loc_cr:.1f}%
+Avg Branch Fill Rate  : {_avg_loc_fill:.1f}%
+
+━━ BEST / WORST PERFORMERS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BRANDS
+  Highest Revenue : {_brand_best_rev}
+  Lowest Revenue  : {_brand_worst_rev}
+  Best Fill Rate  : {_brand_best_fill}
+  Worst Fill Rate : {_brand_worst_fill}
+  Lowest Cancel   : {_brand_best_cr}
+  Highest Cancel  : {_brand_worst_cr}
+  Highest AOV     : {_brand_best_aov}
+  Lowest AOV      : {_brand_worst_aov}
+BRANCHES
+  Highest Revenue : {_loc_best_rev}
+  Lowest Revenue  : {_loc_worst_rev}
+  Best Fill Rate  : {_loc_best_fill}
+  Worst Fill Rate : {_loc_worst_fill}
+  Lowest Cancel   : {_loc_best_cr}
+  Highest Cancel  : {_loc_worst_cr}
+PROVIDERS
+  Highest Revenue : {_prov_best_rev}
+  Lowest Revenue  : {_prov_worst_rev}
+  Lowest Cancel   : {_prov_best_cr}
+  Highest Cancel  : {_prov_worst_cr}
+
+━━ RISK FLAGS — above-average cancellation rate ━━━━━━━━━
+BRANDS ABOVE AVERAGE ({_avg_brand_cr:.1f}%):
+{chr(10).join(f"  ⚠ {n}: {v:.1f}%" for n, v in _risky_brands.items()) or "  None — all brands within normal range"}
+BRANCHES ABOVE AVERAGE ({_avg_loc_cr:.1f}%):
+{chr(10).join(f"  ⚠ {n}: {v:.1f}%" for n, v in _risky_locs.items()) or "  None — all branches within normal range"}
+
+━━ BY BRAND (full breakdown) ━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{_tbl_to_text(_brand_tbl)}
+
+━━ BY BRANCH / LOCATION (full breakdown) ━━━━━━━━━━━━━━━
+{_tbl_to_text(_loc_tbl)}
+
+━━ BY DELIVERY PROVIDER ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{_tbl_to_text(_prov_tbl)}
+
+━━ BY TECHNOLOGY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{_tbl_to_text(_tech_tbl)}
+
+━━ TOP 10 MENU ITEMS BY REVENUE ━━━━━━━━━━━━━━━━━━━━━━━━
+{chr(10).join(f"  {n}: {v:,.0f} SAR" for n, v in _ai_top_items.items()) or "  No data"}
+
+━━ TOP 10 MENU ITEMS BY QUANTITY ━━━━━━━━━━━━━━━━━━━━━━━
+{chr(10).join(f"  {n}: {int(v):,} units" for n, v in _ai_top_items_qty.items()) or "  No data"}
+
+━━ DAY-OF-WEEK PATTERNS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{_dow_dist or "  No date data available"}
+
+━━ MONTHLY TREND (last 6 months) ━━━━━━━━━━━━━━━━━━━━━━━
+{_monthly_trend or "  No date data available"}
+"""
+
+            _system_instruction = """You are a senior business intelligence consultant and strategic advisor for Alnumuw, a Saudi multi-brand restaurant group. You have deep expertise in F&B operations, delivery platforms, and restaurant performance analytics.
+
+CRITICAL DIMENSION RULES — NEVER break these:
+• BRAND = restaurant concept/chain. Use "BY BRAND" section for brand questions.
+• BRANCH = physical store/location. Use "BY BRANCH" section for location questions.
+• PROVIDER = delivery aggregator. Use "BY DELIVERY PROVIDER" section for platform questions.
+• TECHNOLOGY = POS system. Use "BY TECHNOLOGY" section for tech questions.
+Never mix or confuse these dimensions in your answers.
+
+YOUR ANALYTICAL FRAMEWORK — apply to every response:
+1. DIAGNOSE: What does the data actually show? State the key finding clearly with exact numbers.
+2. BENCHMARK: Compare against the group average. Is this above or below average?
+3. PATTERN: What pattern or trend does this reveal? (concentration, outliers, seasonality)
+4. RISK: What risks does this expose? (high cancel rates, low fill rates, revenue concentration)
+5. OPPORTUNITY: Where is there untapped potential? (underperforming brands, strong DOW peaks)
+6. RECOMMEND: Give 2-3 specific, actionable recommendations the owner can act on immediately.
+
+RESPONSE FORMAT:
+- Always open with a **bold executive summary** (1-2 sentences with the main finding)
+- Use markdown tables when comparing 3+ items side-by-side
+- Use bullet points for recommendations, prefixed with 🔴 (urgent), 🟡 (medium), 🟢 (opportunity)
+- End analytical responses with a "**💡 Bottom Line:**" section
+- Keep total response under 400 words unless the user asks for a detailed report
+
+METRIC DEFINITIONS (use these consistently):
+- Fill Rate = Completed ÷ (Completed + Cancelled) × 100
+- Cancel Rate = Cancelled ÷ Total Orders × 100
+- AOV = Revenue ÷ Total Orders
+- Revenue Concentration = share of top N entities vs total
+
+PROACTIVE BEHAVIOUR:
+- When answering a specific question, also flag 1 related insight the user didn't ask about
+- If you spot a risk in the data (e.g. one branch has 3× average cancel rate), mention it briefly
+- Suggest a follow-up question the user might want to explore next
+
+""" + _data_ctx
+
+            # Build message list for Groq (OpenAI-compatible format)
+            _groq_messages = [{"role": "system", "content": _system_instruction}]
+            for _m in st.session_state.chat_history[:-1]:   # exclude current user msg
+                _groq_messages.append({
+                    "role": _m["role"],   # "user" or "assistant"
+                    "content": _m["content"],
+                })
+            _groq_messages.append({"role": "user", "content": _user_input})
+
+            # ── Call Groq ─────────────────────────────────────────────────────
+            with st.chat_message("assistant"):
+                with st.spinner("Analysing your data …"):
+                    try:
+                        from groq import Groq as _Groq
+                        _client = _Groq(api_key=ai_key)
+                        _resp   = _client.chat.completions.create(
+                            model="llama-3.3-70b-versatile",
+                            messages=_groq_messages,
+                            temperature=0.2,
+                            max_tokens=1500,
+                        )
+                        _answer = _resp.choices[0].message.content
+                    except Exception as _err:
+                        _answer = (
+                            f"⚠️ **AI error:**\n\n"
+                            f"```\n{_err}\n```\n\n"
+                            "Please check that your Groq API key is valid. "
+                            "Get a free key at [console.groq.com](https://console.groq.com)."
+                        )
+                st.markdown(_answer)
+
+            st.session_state.chat_history.append({"role": "assistant", "content": _answer})
+
+        # ── Clear conversation button ─────────────────────────────────────────
+        if st.session_state.get("chat_history"):
+            st.markdown("---")
+            if st.button("🗑️ Clear conversation", key="clear_ai_chat"):
+                st.session_state.chat_history = []
+                st.rerun()
