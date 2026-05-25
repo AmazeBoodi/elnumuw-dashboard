@@ -2683,11 +2683,11 @@ with tab_ai:
         ai_key = _secrets_ai_key          # pre-configured: invisible to visitors
     else:
         ai_key = st.text_input(
-            "🔑 Gemini API Key",
+            "🔑 Groq API Key",
             type="password",
-            placeholder="Paste your free key from aistudio.google.com …",
-            key="gemini_api_key",
-            help="Used only for this browser session. Never stored or sent anywhere except Google's API.",
+            placeholder="Paste your free key from console.groq.com …",
+            key="groq_api_key_input",
+            help="Used only for this browser session. Never stored or sent anywhere except Groq's API.",
         )
         if not ai_key:
             st.info(
