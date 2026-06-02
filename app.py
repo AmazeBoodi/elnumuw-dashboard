@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import html as _html   # used to escape data-derived strings before injecting into HTML tables
 
 # We let Streamlit manage the background theme naturally based on device preferences
 st.set_page_config(page_title="Alnumuw Dashboard", page_icon="📊", layout="wide")
@@ -640,7 +641,7 @@ def render_comparison_table(df, growth_map, value_format=None, col_labels=None,
         'font-size:0.8rem;position:sticky;top:0;z-index:2;'
     )
     header = ''.join(
-        f'<th style="{_th_style}">{labels.get(c, c)}</th>'
+        f'<th style="{_th_style}">{_html.escape(str(labels.get(c, c)))}</th>'
         for c in display_cols
     )
 
@@ -674,7 +675,9 @@ def render_comparison_table(df, growth_map, value_format=None, col_labels=None,
             cells.append(
                 f'<td style="padding:8px 14px;white-space:nowrap;'
                 f'border-bottom:1px solid rgba(128,128,128,0.1)">'
-                f'{v_str}{span}</td>'
+                # v_str is data-derived (brand/branch/item names) → escape it.
+                # span is our own trusted HTML (coloured arrows) → must NOT be escaped.
+                f'{_html.escape(v_str)}{span}</td>'
             )
         rows_html.append(f'<tr style="line-height:1.6">{"".join(cells)}</tr>')
 
@@ -1688,6 +1691,9 @@ with tab_branches:
         _br_fr_sum = branches['Completed'] + branches['Rejected']
         _br_fr_denom = _br_fr_sum.where(_br_fr_sum > 0)
         branches['Fill Rate %'] = (branches['Completed'] / _br_fr_denom * 100).fillna(100)
+        # Fail Rate = cancelled ÷ resolved (Completed + Rejected) — the complement of
+        # Fill Rate, matching the Summary "Fail Rate" definition (In Progress excluded).
+        branches['Fail Rate %'] = (branches['Rejected'] / _br_fr_denom * 100).fillna(0)
         branches['AOV']         = branches['Current Sales'] / branches['Total Orders'].where(branches['Total Orders'] > 0)
 
         if compare_on and not o_old.empty:
@@ -1714,15 +1720,16 @@ with tab_branches:
             _denom_old_sum = old_b['_PrevCompleted'] + old_b['_PrevRejected']
             _denom_old = _denom_old_sum.where(_denom_old_sum > 0)
             old_b['_PrevFillRate']  = (old_b['_PrevCompleted'] / _denom_old * 100).fillna(100)
+            old_b['_PrevFailRate']  = (old_b['_PrevRejected'] / _denom_old * 100).fillna(0)
             old_b['_PrevAOV']       = (old_b['_PrevSales'] /
                                        old_b['_PrevOrders'].where(old_b['_PrevOrders'] > 0))
 
             branches = branches.merge(old_b[['Branch','_PrevSales','_PrevOrders',
                                               '_PrevCompleted','_PrevRejected',
-                                              '_PrevFillRate','_PrevAOV']],
+                                              '_PrevFillRate','_PrevFailRate','_PrevAOV']],
                                       on='Branch', how='left')
             for c in ['_PrevSales','_PrevOrders','_PrevCompleted','_PrevRejected',
-                       '_PrevFillRate','_PrevAOV']:
+                       '_PrevFillRate','_PrevFailRate','_PrevAOV']:
                 branches[c] = pd.to_numeric(branches[c], errors='coerce').fillna(0)
 
             def _pct_diff(cur, prev): return ((cur - prev) / prev.where(prev > 0)) * 100
@@ -1731,6 +1738,7 @@ with tab_branches:
             branches['Completed vs Prev %'] = _pct_diff(branches['Completed'],     branches['_PrevCompleted'])
             branches['Rejected vs Prev %']  = _pct_diff(branches['Rejected'],      branches['_PrevRejected'])
             branches['Fill Rate vs Prev pp']= branches['Fill Rate %'] - branches['_PrevFillRate']
+            branches['Fail Rate vs Prev pp']= branches['Fail Rate %'] - branches['_PrevFailRate']
             branches['AOV vs Prev %']       = _pct_diff(branches['AOV'],           branches['_PrevAOV'])
             # _Prev* columns are kept (not dropped) so render_comparison_table can
             # show "was X" alongside each % arrow via prev_map.
@@ -1740,19 +1748,20 @@ with tab_branches:
                           'Completed',      'Completed vs Prev %',  '_PrevCompleted',
                           'Rejected',       'Rejected vs Prev %',   '_PrevRejected',
                           'Fill Rate %',    'Fill Rate vs Prev pp', '_PrevFillRate',
+                          'Fail Rate %',    'Fail Rate vs Prev pp', '_PrevFailRate',
                           'AOV',            'AOV vs Prev %',        '_PrevAOV']
         else:
-            cols_order = ['Branch','Current Sales','Total Orders','Completed','Rejected','Fill Rate %','AOV']
+            cols_order = ['Branch','Current Sales','Total Orders','Completed','Rejected','Fill Rate %','Fail Rate %','AOV']
 
         branches = branches[[c for c in cols_order if c in branches.columns]]
 
         # ── Sort controls + Export ──────────────────────────────────────────
-        _b_sort_opts = ['Current Sales', 'Total Orders', 'Completed', 'Rejected', 'Fill Rate %', 'AOV']
+        _b_sort_opts = ['Current Sales', 'Total Orders', 'Completed', 'Rejected', 'Fill Rate %', 'Fail Rate %', 'AOV']
         _b_sort_opts = [c for c in _b_sort_opts if c in branches.columns]
         _branch_sort_labels = {
             'Current Sales': 'Sales (SAR)', 'Total Orders': 'Orders',
             'Completed': 'Completed', 'Rejected': 'Rejected',
-            'Fill Rate %': 'Fill Rate %', 'AOV': 'AOV (SAR)',
+            'Fill Rate %': 'Fill Rate %', 'Fail Rate %': 'Fail Rate %', 'AOV': 'AOV (SAR)',
         }
         _b1, _b2, _b3 = st.columns([2, 1.5, 1])
         with _b1:
@@ -1800,6 +1809,7 @@ with tab_branches:
                     'Completed':     'Completed vs Prev %',
                     'Rejected':      'Rejected vs Prev %',
                     'Fill Rate %':   'Fill Rate vs Prev pp',
+                    'Fail Rate %':   'Fail Rate vs Prev pp',
                     'AOV':           'AOV vs Prev %',
                 },
                 value_format={
@@ -1808,27 +1818,31 @@ with tab_branches:
                     'Completed':     '{:,}',
                     'Rejected':      '{:,}',
                     'Fill Rate %':   '{:.1f}%',
+                    'Fail Rate %':   '{:.1f}%',
                     'AOV':           '{:,.0f}',
                 },
                 col_labels={
                     'Current Sales':        'Sales (SAR)',
                     'Total Orders':         'Orders',
                     'Fill Rate %':          'Fill Rate',
+                    'Fail Rate %':          'Fail Rate',
                     'AOV':                  'AOV (SAR)',
                     'Sales vs Prev %':      'vs Prev',
                     'Orders vs Prev %':     'vs Prev',
                     'Completed vs Prev %':  'vs Prev',
                     'Rejected vs Prev %':   'vs Prev',
                     'Fill Rate vs Prev pp': 'vs Prev',
+                    'Fail Rate vs Prev pp': 'vs Prev',
                     'AOV vs Prev %':        'vs Prev',
                 },
-                inverse_cols={'Rejected'},
+                inverse_cols={'Rejected', 'Fail Rate %'},
                 prev_map={
                     'Current Sales': '_PrevSales',
                     'Total Orders':  '_PrevOrders',
                     'Completed':     '_PrevCompleted',
                     'Rejected':      '_PrevRejected',
                     'Fill Rate %':   '_PrevFillRate',
+                    'Fail Rate %':   '_PrevFailRate',
                     'AOV':           '_PrevAOV',
                 } if _has_br_prev else {},
                 prev_format={
@@ -1837,13 +1851,14 @@ with tab_branches:
                     'Completed':     '{:,}',
                     'Rejected':      '{:,}',
                     'Fill Rate %':   '{:.1f}%',
+                    'Fail Rate %':   '{:.1f}%',
                     'AOV':           '{:,.0f} SAR',
                 },
             )
         else:
             fmt_map = {'Current Sales':'{:,.0f}','Total Orders':'{:,}',
                        'Completed':'{:,}','Rejected':'{:,}',
-                       'Fill Rate %':'{:.1f}%','AOV':'{:,.0f}'}
+                       'Fill Rate %':'{:.1f}%','Fail Rate %':'{:.1f}%','AOV':'{:,.0f}'}
             fmt_apply = {k: v for k, v in fmt_map.items() if k in branches.columns}
             styled = (branches.style
                       .apply(_highlight_topbot, axis=None)
@@ -1856,6 +1871,7 @@ with tab_branches:
                              "Completed":     st.column_config.TextColumn("Completed"),
                              "Rejected":      st.column_config.TextColumn("Rejected"),
                              "Fill Rate %":   st.column_config.TextColumn("Fill Rate %"),
+                             "Fail Rate %":   st.column_config.TextColumn("Fail Rate %"),
                              "AOV":           st.column_config.TextColumn("AOV (SAR)"),
                          },
                          height=min(700, 60 + 35 * len(branches)))
@@ -2919,6 +2935,31 @@ with tab_ai:
         )
 
         if _user_input:
+            # ── Per-session rate limit — protects the shared Groq quota from abuse.
+            # Caps each browser session to _RATE_MAX questions per _RATE_WIN seconds.
+            # (Groq account limits + spending caps remain the server-side backstop
+            #  for abuse spread across many sessions.) The AI tab is the last thing
+            # rendered, so st.stop() here halts nothing else on the page.
+            import time as _time
+            _now = _time.time()
+            _RATE_WIN, _RATE_MAX = 60, 12
+            st.session_state.setdefault("ai_call_times", [])
+            st.session_state.ai_call_times = [
+                _t for _t in st.session_state.ai_call_times if _now - _t < _RATE_WIN
+            ]
+            if len(st.session_state.ai_call_times) >= _RATE_MAX:
+                _wait = max(1, int(_RATE_WIN - (_now - st.session_state.ai_call_times[0])))
+                with st.chat_message("user"):
+                    st.markdown(_user_input)
+                with st.chat_message("assistant"):
+                    st.markdown(
+                        f"⏳ You're asking questions very quickly. Please wait about "
+                        f"**{_wait} seconds** and try again — this limit protects the shared "
+                        f"AI quota so it stays available for everyone."
+                    )
+                st.stop()
+            st.session_state.ai_call_times.append(_now)
+
             # Display the user bubble immediately
             with st.chat_message("user"):
                 st.markdown(_user_input)
