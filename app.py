@@ -758,23 +758,29 @@ def render_dim_tab(df_raw, dim_label, compare_on, tab_key, extra_charts_fn=None)
         extra_charts_fn(df)
 
     # ── Table ───────────────────────────────────────────────────────────────
+    _has_share = 'Share %' in df.columns
     if compare_on and 'Sales vs Prev %' in df.columns:
         _has_prev = '_PrevSales' in df.columns
+        _vfmt = {'Sales': '{:,.0f}', 'Orders': '{:,}', 'AOV': '{:,.0f}'}
+        _clabels = {
+            dim_label: dim_label,
+            'Sales':   'Sales (SAR)',
+            'Orders':  'Orders',
+            'AOV':     'AOV (SAR)',
+            'Sales vs Prev %':  'vs Prev',
+            'Orders vs Prev %': 'vs Prev',
+            'AOV vs Prev %':    'vs Prev',
+        }
+        if _has_share:
+            _vfmt['Share %'] = '{:.1f}%'
+            _clabels['Share %'] = 'Share %'
         render_comparison_table(
             df,
             growth_map={'Sales':  'Sales vs Prev %',
                         'Orders': 'Orders vs Prev %',
                         'AOV':    'AOV vs Prev %'},
-            value_format={'Sales': '{:,.0f}', 'Orders': '{:,}', 'AOV': '{:,.0f}'},
-            col_labels={
-                dim_label: dim_label,
-                'Sales':   'Sales (SAR)',
-                'Orders':  'Orders',
-                'AOV':     'AOV (SAR)',
-                'Sales vs Prev %':  'vs Prev',
-                'Orders vs Prev %': 'vs Prev',
-                'AOV vs Prev %':    'vs Prev',
-            },
+            value_format=_vfmt,
+            col_labels=_clabels,
             prev_map={
                 'Sales':  '_PrevSales',
                 'Orders': '_PrevOrders',
@@ -788,19 +794,23 @@ def render_dim_tab(df_raw, dim_label, compare_on, tab_key, extra_charts_fn=None)
         )
     else:
         vfmt = {c: v for c, v in
-                {'Sales': '{:,.0f}', 'Orders': '{:,}', 'AOV': '{:,.0f}'}.items()
+                {'Sales': '{:,.0f}', 'Orders': '{:,}', 'AOV': '{:,.0f}',
+                 'Share %': '{:.1f}%'}.items()
                 if c in df.columns}
+        col_cfg = {
+            dim_label: st.column_config.TextColumn(dim_label),
+            'Sales':   st.column_config.TextColumn('Sales (SAR)'),
+            'Orders':  st.column_config.TextColumn('Orders'),
+            'AOV':     st.column_config.TextColumn('AOV (SAR)'),
+        }
+        if _has_share:
+            col_cfg['Share %'] = st.column_config.TextColumn('Share %')
         st.dataframe(
             df.style.format(vfmt, na_rep='—'),
             use_container_width=True,
             hide_index=True,
             height=min(700, 60 + 35 * len(df)),
-            column_config={
-                dim_label: st.column_config.TextColumn(dim_label),
-                'Sales':   st.column_config.TextColumn('Sales (SAR)'),
-                'Orders':  st.column_config.TextColumn('Orders'),
-                'AOV':     st.column_config.TextColumn('AOV (SAR)'),
-            },
+            column_config=col_cfg,
         )
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -881,97 +891,101 @@ with tab_summary:
         st.markdown("---")
         st.markdown("### 📋 Performance Snapshot by Dimension")
 
-        def _build_snapshot(cur_df, cur_fr_df, dim_col):
-            """Compact Revenue / Orders / AOV / Fill Rate / Fail Rate per dimension."""
-            base = cur_df.groupby(dim_col).agg(
+        def _build_snapshot(cur_df, old_df, dim_col):
+            """Revenue / Orders / AOV per dimension; adds % vs prev when comparison is on."""
+            cur = cur_df.groupby(dim_col).agg(
                 Revenue=('Sales',    'sum'),
                 Orders =('Order ID', 'count'),
             ).reset_index()
-            base['AOV'] = (base['Revenue'] / base['Orders'].where(base['Orders'] > 0)).round(0)
-            # Fill/fail rates from the status-unfiltered slice
-            fr = cur_fr_df.groupby(dim_col).agg(
-                _Comp=('Status', lambda s: (s == 'Completed').sum()),
-                _Canc=('Status', lambda s: s.isin(REJECTED_STATUSES).sum()),
+            cur['AOV'] = (cur['Revenue'] / cur['Orders'].where(cur['Orders'] > 0)).round(0)
+            if not compare_on or old_df.empty:
+                return cur.sort_values('Revenue', ascending=False).reset_index(drop=True)
+            old = old_df.groupby(dim_col).agg(
+                _PrevRevenue=('Sales',    'sum'),
+                _PrevOrders =('Order ID', 'count'),
             ).reset_index()
-            _raw_denom = fr['_Comp'] + fr['_Canc']
-            _denom = _raw_denom.where(_raw_denom > 0)
-            fr['Fill Rate %'] = (fr['_Comp'] / _denom * 100).fillna(100).round(1)
-            fr['Fail Rate %'] = (fr['_Canc'] / _denom * 100).fillna(0).round(1)
-            result = base.merge(fr[[dim_col, 'Fill Rate %', 'Fail Rate %']], on=dim_col, how='left')
-            return result.sort_values('Revenue', ascending=False).reset_index(drop=True)
+            df = cur.merge(old, on=dim_col, how='outer')
+            for c in ['Revenue', 'Orders', '_PrevRevenue', '_PrevOrders']:
+                df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+            df['AOV'] = (df['Revenue'] / df['Orders'].where(df['Orders'] > 0)).round(0)
+            _prev_aov = (df['_PrevRevenue'] / df['_PrevOrders'].where(df['_PrevOrders'] > 0))
+            df['_PrevAOV'] = _prev_aov.round(0)
+            df['Revenue vs Prev %'] = ((df['Revenue'] - df['_PrevRevenue']) /
+                                        df['_PrevRevenue'].where(df['_PrevRevenue'] > 0)) * 100
+            df['Orders vs Prev %']  = ((df['Orders']  - df['_PrevOrders']) /
+                                        df['_PrevOrders'].where(df['_PrevOrders'] > 0)) * 100
+            df['AOV vs Prev %']     = ((df['AOV'] - _prev_aov) /
+                                        _prev_aov.where(_prev_aov > 0)) * 100
+            return df.sort_values('Revenue', ascending=False).reset_index(drop=True)
 
         def _render_snapshot(df, dim_col):
-            """Render a compact snapshot table with green/red cell shading (no matplotlib)."""
-            fmt = {
-                'Revenue':     '{:,.0f}',
-                'Orders':      '{:,}',
-                'AOV':         '{:,.0f}',
-                'Fill Rate %': '{:.1f}%',
-                'Fail Rate %': '{:.1f}%',
-            }
-            col_rename = {dim_col: dim_col, 'Revenue': 'Revenue (SAR)', 'Orders': 'Orders',
-                          'AOV': 'AOV (SAR)', 'Fill Rate %': 'Fill %', 'Fail Rate %': 'Fail %'}
-            disp = df.rename(columns=col_rename)
-
-            def _fill_color(col):
-                """Green = high fill rate, red = low fill rate (60–100 range)."""
-                def _one(v):
-                    try:
-                        t = max(0.0, min(1.0, (float(v) - 60) / 40))  # 60→0, 100→1
-                        r = int(239 - t * (239 - 34))
-                        g = int(68  + t * (197 - 68))
-                        return f'background-color:rgba({r},{g},68,0.35)'
-                    except Exception:
-                        return ''
-                return col.map(_one)
-
-            def _fail_color(col):
-                """Red = high fail rate, green = low fail rate (0–40 range)."""
-                def _one(v):
-                    try:
-                        t = max(0.0, min(1.0, float(v) / 40))  # 0→0, 40→1
-                        r = int(34  + t * (239 - 34))
-                        g = int(197 - t * (197 - 68))
-                        return f'background-color:rgba({r},{g},68,0.35)'
-                    except Exception:
-                        return ''
-                return col.map(_one)
-
-            styled = (
-                disp.style
-                .format({col_rename.get(k, k): v for k, v in fmt.items()}, na_rep='—')
-                .apply(_fill_color, subset=['Fill %'])
-                .apply(_fail_color, subset=['Fail %'])
-            )
-            st.dataframe(
-                styled,
-                use_container_width=True,
-                hide_index=True,
-                height=min(500, 60 + 35 * len(df)),
-            )
+            """Plain dataframe or comparison table depending on compare_on."""
+            if compare_on and 'Revenue vs Prev %' in df.columns:
+                render_comparison_table(
+                    df,
+                    growth_map={
+                        'Revenue': 'Revenue vs Prev %',
+                        'Orders':  'Orders vs Prev %',
+                        'AOV':     'AOV vs Prev %',
+                    },
+                    value_format={
+                        'Revenue': '{:,.0f}',
+                        'Orders':  '{:,}',
+                        'AOV':     '{:,.0f}',
+                    },
+                    col_labels={
+                        'Revenue':          'Revenue (SAR)',
+                        'Revenue vs Prev %':'vs Prev',
+                        'Orders vs Prev %': 'vs Prev',
+                        'AOV vs Prev %':    'vs Prev',
+                    },
+                    prev_map={
+                        'Revenue': '_PrevRevenue',
+                        'Orders':  '_PrevOrders',
+                        'AOV':     '_PrevAOV',
+                    },
+                    prev_format={
+                        'Revenue': '{:,.0f}',
+                        'Orders':  '{:,}',
+                        'AOV':     '{:,.0f}',
+                    },
+                    max_height="500px",
+                )
+            else:
+                st.dataframe(
+                    df[[ dim_col, 'Revenue', 'Orders', 'AOV' ]]
+                      .style.format({
+                          'Revenue': '{:,.0f}',
+                          'Orders':  '{:,}',
+                          'AOV':     '{:,.0f}',
+                      }, na_rep='—'),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=min(500, 60 + 35 * len(df)),
+                    column_config={
+                        'Revenue': st.column_config.TextColumn('Revenue (SAR)'),
+                        'AOV':     st.column_config.TextColumn('AOV (SAR)'),
+                    },
+                )
 
         _sn_c1, _sn_c2 = st.columns(2)
         with _sn_c1:
             st.markdown("#### 🏷️ By Brand")
-            _snap_brand = _build_snapshot(o_cur, o_cur_fr, 'Brand')
-            _render_snapshot(_snap_brand, 'Brand')
+            _render_snapshot(_build_snapshot(o_cur, o_old, 'Brand'), 'Brand')
 
         with _sn_c2:
             st.markdown("#### 📍 By Branch")
-            _snap_branch = _build_snapshot(o_cur, o_cur_fr, 'Location')
-            _snap_branch = _snap_branch.rename(columns={'Location': 'Branch'})
+            _snap_branch = _build_snapshot(o_cur, o_old, 'Location').rename(columns={'Location': 'Branch'})
             _render_snapshot(_snap_branch, 'Branch')
 
         _sn_c3, _sn_c4 = st.columns(2)
         with _sn_c3:
             st.markdown("#### 🚚 By Aggregator")
-            _snap_prov = _build_snapshot(o_cur, o_cur_fr, 'Provider')
-            _render_snapshot(_snap_prov, 'Provider')
+            _render_snapshot(_build_snapshot(o_cur, o_old, 'Provider'), 'Provider')
 
         with _sn_c4:
             st.markdown("#### ⚙️ By Technology")
-            _snap_tech = _build_snapshot(o_cur, o_cur_fr, 'Technology')
-            _render_snapshot(_snap_tech, 'Technology')
+            _render_snapshot(_build_snapshot(o_cur, o_old, 'Technology'), 'Technology')
 
     else:
         st.info("No timeline data found for current filters.")
@@ -988,7 +1002,8 @@ with tab_orders:
         ).reset_index()
         daily_all['Completed'] = daily_all['Total'] - daily_all['Cancelled'] - daily_all['InProgress']
         # Fill Rate only over orders with a definitive outcome
-        _fr_denom = (daily_all['Completed'] + daily_all['Cancelled']).replace(0, pd.NA)
+        _fr_sum = daily_all['Completed'] + daily_all['Cancelled']
+        _fr_denom = _fr_sum.where(_fr_sum > 0)
         daily_all['Fill Rate %'] = (daily_all['Completed'] / _fr_denom * 100)
 
         daily_rev = o_cur.groupby('Date').agg(
@@ -1001,7 +1016,7 @@ with tab_orders:
                           .groupby('Date')['Sales'].sum()
                           .reset_index().rename(columns={'Sales': 'CancelledRev'}))
         daily_rev = daily_rev.merge(daily_canc_rev, on='Date', how='left').fillna({'CancelledRev': 0})
-        daily_rev['AOV'] = daily_rev['CompletedRev'] / daily_rev['TotalOrders'].replace(0, pd.NA)
+        daily_rev['AOV'] = daily_rev['CompletedRev'] / daily_rev['TotalOrders'].where(daily_rev['TotalOrders'] > 0)
 
         # ── CHART 1a: Daily order volume (stacked bar) ──────────────────────
         st.markdown("#### 📊 Daily Orders: Completed vs In Progress vs Cancelled")
@@ -1137,7 +1152,7 @@ with tab_orders:
             old_aov = o_old.groupby('Date').agg(
                 Sales=('Sales','sum'), Orders=('Order ID','count')
             ).reset_index()
-            old_aov['AOV'] = old_aov['Sales'] / old_aov['Orders'].replace(0, pd.NA)
+            old_aov['AOV'] = old_aov['Sales'] / old_aov['Orders'].where(old_aov['Orders'] > 0)
             cmp_offset = pd.Timestamp(sd) - pd.Timestamp(cmp_s)
             old_aov['Aligned Date'] = old_aov['Date'] + cmp_offset
             fig_aov.add_trace(go.Scatter(
@@ -1171,7 +1186,8 @@ with tab_orders:
             old_daily['_OldCompleted'] = (
                 old_daily['_OldOrders'] - old_daily['_OldCancelled'] - old_daily['_OldInProgress']
             ).clip(lower=0)
-            _old_fr_denom = (old_daily['_OldCompleted'] + old_daily['_OldCancelled']).replace(0, pd.NA)
+            _old_fr_sum = old_daily['_OldCompleted'] + old_daily['_OldCancelled']
+            _old_fr_denom = _old_fr_sum.where(_old_fr_sum > 0)
             old_daily['_OldFillRate']  = (old_daily['_OldCompleted'] / _old_fr_denom * 100)
             old_rev_d = o_old.groupby('Date').agg(_OldRev=('Sales','sum'),
                                                    _OldRevOrds=('Order ID','count')).reset_index()
@@ -1300,14 +1316,16 @@ with tab_lost:
     else:
         total_cancelled = len(lost_cur)
         lost_revenue    = lost_cur['Sales'].sum()
-        total_orders_fr = len(o_cur_fr)
-        cancel_rate     = (total_cancelled / total_orders_fr * 100) if total_orders_fr > 0 else 0.0
+        # Cancellation Rate uses the SAME denominator as the Summary "Fail Rate":
+        # resolved orders (Completed + Cancelled), excluding In Progress.
+        _resolved_cur   = comp_cur + rej_cur
+        cancel_rate     = (total_cancelled / _resolved_cur * 100) if _resolved_cur > 0 else 0.0
 
         # Previous-period equivalents
         total_cancelled_old = len(lost_old)
         lost_revenue_old    = lost_old['Sales'].sum() if not lost_old.empty else 0.0
-        total_orders_fr_old = len(o_old_fr)
-        cancel_rate_old     = (total_cancelled_old / total_orders_fr_old * 100) if total_orders_fr_old > 0 else 0.0
+        _resolved_old       = comp_old + rej_old
+        cancel_rate_old     = (total_cancelled_old / _resolved_old * 100) if _resolved_old > 0 else 0.0
 
         # KPI tiles for the Lost Orders view (deltas use inverse coloring
         # because MORE cancellations / lost revenue is BAD, not good).
@@ -1327,6 +1345,7 @@ with tab_lost:
             k[1].metric("💸 Lost Revenue", f"{lost_revenue:,.0f} SAR")
             k[2].metric("📉 Cancellation Rate", f"{cancel_rate:.1f}%")
 
+        st.caption("Cancellation Rate = cancelled ÷ resolved orders (Completed + Cancelled). In Progress orders are excluded, so this matches the **Fail Rate** shown on the Summary tab.")
         st.markdown("---")
 
         # Daily cancellation trend
@@ -1360,9 +1379,16 @@ with tab_lost:
             cur_g.columns = [dim, 'Cancelled', 'Lost Revenue']
             tot_cur = fr_cur.groupby(dim).size().reset_index()
             tot_cur.columns = [dim, 'Total Orders']
-            cur_g = cur_g.merge(tot_cur, on=dim, how='left').fillna(0)
+            # In Progress per dimension — excluded from the rate denominator so
+            # Cancel Rate matches the Summary "Fail Rate" (resolved orders only).
+            inp_cur = (fr_cur[fr_cur['Status'].isin(IN_PROGRESS_STATUSES)]
+                       .groupby(dim).size().reset_index())
+            inp_cur.columns = [dim, '_InProgress']
+            cur_g = (cur_g.merge(tot_cur, on=dim, how='left')
+                          .merge(inp_cur, on=dim, how='left').fillna(0))
+            _resolved_cur = (cur_g['Total Orders'] - cur_g['_InProgress'])
             cur_g['Cancel Rate %'] = (cur_g['Cancelled'] /
-                                      cur_g['Total Orders'].where(cur_g['Total Orders'] > 0)) * 100
+                                      _resolved_cur.where(_resolved_cur > 0)) * 100
             # Column order: dimension → Total Orders → Cancelled → Lost Revenue → Cancel Rate
             cur_g = cur_g[[dim, 'Total Orders', 'Cancelled', 'Lost Revenue', 'Cancel Rate %']]
             if not with_compare or old_lost.empty:
@@ -1373,9 +1399,15 @@ with tab_lost:
             ).reset_index()
             tot_old = fr_old.groupby(dim).size().reset_index()
             tot_old.columns = [dim, '_PrevTotal']
-            old_g = old_g.merge(tot_old, on=dim, how='left').fillna(0)
+            inp_old = (fr_old[fr_old['Status'].isin(IN_PROGRESS_STATUSES)]
+                       .groupby(dim).size().reset_index())
+            inp_old.columns = [dim, '_PrevInProgress']
+            old_g = (old_g.merge(tot_old, on=dim, how='left')
+                          .merge(inp_old, on=dim, how='left').fillna(0))
+            _resolved_old = (old_g['_PrevTotal'] - old_g['_PrevInProgress'])
             old_g['_PrevCancelRate'] = (old_g['_PrevCancelled'] /
-                                        old_g['_PrevTotal'].where(old_g['_PrevTotal'] > 0)) * 100
+                                        _resolved_old.where(_resolved_old > 0)) * 100
+            old_g = old_g.drop(columns=['_PrevInProgress'])
 
             df = cur_g.merge(old_g, on=dim, how='outer')
             for c in ['Total Orders', 'Cancelled', 'Lost Revenue', 'Cancel Rate %',
@@ -1544,9 +1576,9 @@ with tab_items:
             old_items.columns = ['Item', '_PrevSales', '_PrevQty']
             items_df = cur_items.merge(old_items, on='Item', how='outer').fillna(0)
             items_df['Sales vs Prev %'] = ((items_df['Sales'] - items_df['_PrevSales']) /
-                                           items_df['_PrevSales'].replace(0, pd.NA)) * 100
+                                           items_df['_PrevSales'].where(items_df['_PrevSales'] > 0)) * 100
             items_df['Qty vs Prev %']   = ((items_df['Qty']   - items_df['_PrevQty'])   /
-                                           items_df['_PrevQty'].replace(0, pd.NA))   * 100
+                                           items_df['_PrevQty'].where(items_df['_PrevQty'] > 0))   * 100
             # _PrevSales and _PrevQty kept for "was X" display via prev_map
             items_df = items_df[['Item', 'Sales', 'Sales vs Prev %', '_PrevSales',
                                   'Qty', 'Qty vs Prev %', '_PrevQty']]
@@ -1574,15 +1606,18 @@ with tab_items:
             )
         items_df = items_df.sort_values(_i_sort, ascending=_i_dir.startswith('↑')).reset_index(drop=True)
 
-        # Top 10 chart always uses Sales-sorted top 10
-        top10 = items_df.nlargest(10, 'Sales')
-        fig_i = px.bar(top10, x='Sales', y='Item', orientation='h',
-                       color_discrete_sequence=[ct['accent']], template="plotly_dark", text='Sales')
+        # Top 10 chart respects the selected measure (Sales or Qty)
+        _chart_col   = _i_sort   # 'Sales' or 'Qty'
+        _chart_label = _items_sort_labels.get(_chart_col, _chart_col)
+        top10 = items_df.nlargest(10, _chart_col)
+        fig_i = px.bar(top10, x=_chart_col, y='Item', orientation='h',
+                       color_discrete_sequence=[ct['accent']], template="plotly_dark", text=_chart_col)
         fig_i.update_traces(texttemplate='%{text:,.0f}', textposition='outside')
         fig_i.update_layout(dragmode='pan', paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                             height=420, margin=dict(t=20, b=20),
+                            xaxis=dict(title=_chart_label),
                             yaxis=dict(autorange="reversed"), showlegend=False)
-        st.markdown("#### Top 10 Items by Sales")
+        st.markdown(f"#### Top 10 Items by {_chart_label}")
         st.plotly_chart(fig_i, use_container_width=True, config={'scrollZoom': False, 'displayModeBar': 'hover'})
 
         st.markdown("#### Full Items Breakdown")
@@ -1650,9 +1685,10 @@ with tab_branches:
         # In Progress is excluded from both Completed and the Fill Rate denominator
         # so that pending orders do not inflate the fill rate (same logic as KPI tile).
         branches['Completed']   = (branches['TotalFR'] - branches['Rejected'] - branches['InProgress']).clip(lower=0).astype(int)
-        _br_fr_denom = (branches['Completed'] + branches['Rejected']).replace(0, pd.NA)
+        _br_fr_sum = branches['Completed'] + branches['Rejected']
+        _br_fr_denom = _br_fr_sum.where(_br_fr_sum > 0)
         branches['Fill Rate %'] = (branches['Completed'] / _br_fr_denom * 100).fillna(100)
-        branches['AOV']         = branches['Current Sales'] / branches['Total Orders'].replace(0, pd.NA)
+        branches['AOV']         = branches['Current Sales'] / branches['Total Orders'].where(branches['Total Orders'] > 0)
 
         if compare_on and not o_old.empty:
             # Aggregate all previous-period metrics per branch
@@ -1675,7 +1711,8 @@ with tab_branches:
             for c in ['_PrevSales','_PrevOrders','_PrevTotalFR','_PrevRejected','_PrevInProgress']:
                 old_b[c] = pd.to_numeric(old_b[c], errors='coerce').fillna(0)
             old_b['_PrevCompleted'] = (old_b['_PrevTotalFR'] - old_b['_PrevRejected'] - old_b['_PrevInProgress']).clip(lower=0)
-            _denom_old = (old_b['_PrevCompleted'] + old_b['_PrevRejected']).replace(0, pd.NA)
+            _denom_old_sum = old_b['_PrevCompleted'] + old_b['_PrevRejected']
+            _denom_old = _denom_old_sum.where(_denom_old_sum > 0)
             old_b['_PrevFillRate']  = (old_b['_PrevCompleted'] / _denom_old * 100).fillna(100)
             old_b['_PrevAOV']       = (old_b['_PrevSales'] /
                                        old_b['_PrevOrders'].where(old_b['_PrevOrders'] > 0))
@@ -1831,22 +1868,47 @@ with tab_aggs:
     st.markdown("### 🚚 Aggregator Performance")
     df_agg = build_dim_comparison(o_cur, o_old, 'Provider', compare_on)
     df_agg = df_agg.rename(columns={'Provider': 'Aggregator'})
+    # ── % contribution to total sales ──────────────────────────────────────
+    _agg_total = df_agg['Sales'].sum()
+    df_agg.insert(
+        df_agg.columns.get_loc('Sales') + 1,
+        'Share %',
+        (df_agg['Sales'] / _agg_total * 100).round(1) if _agg_total > 0 else 0.0,
+    )
 
     def _agg_charts(df):
         if df.empty:
             return
-        fig_ag = px.bar(
-            df.head(10), x='Sales', y='Aggregator', orientation='h',
-            color_discrete_sequence=[ct['secondary']], template="plotly_dark", text='Sales',
-        )
-        fig_ag.update_traces(texttemplate='%{text:,.0f}', textposition='outside')
-        fig_ag.update_layout(dragmode='pan', 
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            height=max(260, 50 * min(len(df), 10) + 60),
-            margin=dict(t=20, b=20), yaxis=dict(autorange="reversed"), showlegend=False,
-        )
-        st.markdown("#### Sales by Aggregator")
-        st.plotly_chart(fig_ag, use_container_width=True, config={'scrollZoom': False, 'displayModeBar': 'hover'})
+        _ac1, _ac2 = st.columns(2)
+        with _ac1:
+            fig_ag = px.bar(
+                df.head(10), x='Sales', y='Aggregator', orientation='h',
+                color_discrete_sequence=[ct['secondary']], template="plotly_dark", text='Sales',
+            )
+            fig_ag.update_traces(texttemplate='%{text:,.0f}', textposition='outside')
+            fig_ag.update_layout(dragmode='pan',
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                height=max(260, 50 * min(len(df), 10) + 60),
+                margin=dict(t=30, b=20), yaxis=dict(autorange="reversed"), showlegend=False,
+                title=dict(text="Sales by Aggregator", font=dict(size=13)),
+            )
+            st.plotly_chart(fig_ag, use_container_width=True, config={'scrollZoom': False, 'displayModeBar': 'hover'})
+        with _ac2:
+            fig_pie = px.pie(
+                df, values='Sales', names='Aggregator',
+                color_discrete_sequence=ct['pal'], template="plotly_dark", hole=0.45,
+            )
+            fig_pie.update_traces(
+                textinfo='label+percent',
+                hovertemplate="<b>%{label}</b><br>Sales: %{value:,.0f} SAR<br>Share: %{percent}<extra></extra>",
+            )
+            fig_pie.update_layout(dragmode='pan',
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                height=max(260, 50 * min(len(df), 10) + 60),
+                margin=dict(t=30, b=20), showlegend=True,
+                title=dict(text="Sales Contribution by Aggregator", font=dict(size=13)),
+            )
+            st.plotly_chart(fig_pie, use_container_width=True, config={'scrollZoom': False, 'displayModeBar': 'hover'})
 
     render_dim_tab(df_agg, 'Aggregator', compare_on, 'agg', extra_charts_fn=_agg_charts)
 
@@ -1854,22 +1916,47 @@ with tab_aggs:
 with tab_brands:
     st.markdown("### 🏷️ Brand Performance")
     df_brand = build_dim_comparison(o_cur, o_old, 'Brand', compare_on)
+    # ── % contribution to total sales ──────────────────────────────────────
+    _brand_total = df_brand['Sales'].sum()
+    df_brand.insert(
+        df_brand.columns.get_loc('Sales') + 1,
+        'Share %',
+        (df_brand['Sales'] / _brand_total * 100).round(1) if _brand_total > 0 else 0.0,
+    )
 
     def _brand_charts(df):
         if df.empty:
             return
-        fig_br = px.bar(
-            df.head(10), x='Sales', y='Brand', orientation='h',
-            color_discrete_sequence=[ct['tertiary']], template="plotly_dark", text='Sales',
-        )
-        fig_br.update_traces(texttemplate='%{text:,.0f}', textposition='outside')
-        fig_br.update_layout(dragmode='pan', 
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            height=max(260, 50 * min(len(df), 10) + 60),
-            margin=dict(t=20, b=20), yaxis=dict(autorange="reversed"), showlegend=False,
-        )
-        st.markdown("#### Sales by Brand")
-        st.plotly_chart(fig_br, use_container_width=True, config={'scrollZoom': False, 'displayModeBar': 'hover'})
+        _bc1, _bc2 = st.columns(2)
+        with _bc1:
+            fig_br = px.bar(
+                df.head(10), x='Sales', y='Brand', orientation='h',
+                color_discrete_sequence=[ct['tertiary']], template="plotly_dark", text='Sales',
+            )
+            fig_br.update_traces(texttemplate='%{text:,.0f}', textposition='outside')
+            fig_br.update_layout(dragmode='pan',
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                height=max(260, 50 * min(len(df), 10) + 60),
+                margin=dict(t=30, b=20), yaxis=dict(autorange="reversed"), showlegend=False,
+                title=dict(text="Sales by Brand", font=dict(size=13)),
+            )
+            st.plotly_chart(fig_br, use_container_width=True, config={'scrollZoom': False, 'displayModeBar': 'hover'})
+        with _bc2:
+            fig_pie = px.pie(
+                df, values='Sales', names='Brand',
+                color_discrete_sequence=ct['pal'], template="plotly_dark", hole=0.45,
+            )
+            fig_pie.update_traces(
+                textinfo='label+percent',
+                hovertemplate="<b>%{label}</b><br>Sales: %{value:,.0f} SAR<br>Share: %{percent}<extra></extra>",
+            )
+            fig_pie.update_layout(dragmode='pan',
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                height=max(260, 50 * min(len(df), 10) + 60),
+                margin=dict(t=30, b=20), showlegend=True,
+                title=dict(text="Sales Contribution by Brand", font=dict(size=13)),
+            )
+            st.plotly_chart(fig_pie, use_container_width=True, config={'scrollZoom': False, 'displayModeBar': 'hover'})
 
     render_dim_tab(df_brand, 'Brand', compare_on, 'brand', extra_charts_fn=_brand_charts)
 
@@ -2027,17 +2114,21 @@ with tab_time:
         _hfr_tot  = _t_fr.groupby('Hour').size().reset_index(name='Total')
         _hfr_canc = (_t_fr[_t_fr['Status'].isin(REJECTED_STATUSES)]
                      .groupby('Hour').size().reset_index(name='Cancelled'))
-        hourly_fr = _hfr_tot.merge(_hfr_canc, on='Hour', how='left')
-        for _c in ['Total', 'Cancelled']:
+        _hfr_inp  = (_t_fr[_t_fr['Status'].isin(IN_PROGRESS_STATUSES)]
+                     .groupby('Hour').size().reset_index(name='InProgress'))
+        hourly_fr = _hfr_tot.merge(_hfr_canc, on='Hour', how='left').merge(_hfr_inp, on='Hour', how='left')
+        for _c in ['Total', 'Cancelled', 'InProgress']:
             hourly_fr[_c] = pd.to_numeric(hourly_fr[_c], errors='coerce').fillna(0)
         hourly_fr = _all_hours.merge(hourly_fr, on='Hour', how='left').fillna(0)
+        # Resolved = Completed + Cancelled (exclude In Progress) — matches Summary Fail Rate.
+        _h_resolved = (hourly_fr['Total'] - hourly_fr['InProgress'])
         hourly_fr['Cancel Rate %'] = (
-            hourly_fr['Cancelled'] / hourly_fr['Total'].where(hourly_fr['Total'] > 0) * 100
+            hourly_fr['Cancelled'] / _h_resolved.where(_h_resolved > 0) * 100
         ).fillna(0)
         hourly_fr['Hour_Label'] = hourly_fr['Hour'].apply(lambda h: f"{int(h):02d}:00")
 
         avg_cr = (hourly_fr['Cancelled'].sum() /
-                  max(hourly_fr['Total'].sum(), 1) * 100)
+                  max(_h_resolved.sum(), 1) * 100)
 
         fig_cr = go.Figure()
         fig_cr.add_hline(y=avg_cr, line_dash='dot', line_color=GRAY,
@@ -2075,15 +2166,19 @@ with tab_time:
         _slot_tot  = _t_fr.groupby('Slot').size().reset_index(name='Total_FR')
         _slot_canc = (_t_fr[_t_fr['Status'].isin(REJECTED_STATUSES)]
                       .groupby('Slot').size().reset_index(name='Cancelled_FR'))
-        slot_fr = _slot_tot.merge(_slot_canc, on='Slot', how='left')
-        for _c in ['Total_FR', 'Cancelled_FR']:
+        _slot_inp  = (_t_fr[_t_fr['Status'].isin(IN_PROGRESS_STATUSES)]
+                      .groupby('Slot').size().reset_index(name='InProgress_FR'))
+        slot_fr = _slot_tot.merge(_slot_canc, on='Slot', how='left').merge(_slot_inp, on='Slot', how='left')
+        for _c in ['Total_FR', 'Cancelled_FR', 'InProgress_FR']:
             slot_fr[_c] = pd.to_numeric(slot_fr[_c], errors='coerce').fillna(0)
         slot_df = slot_sales.merge(slot_fr, on='Slot', how='left')
         slot_df['AOV'] = (slot_df['Revenue'] /
                           slot_df['Orders'].where(slot_df['Orders'] > 0)).round(0)
+        # Resolved = Completed + Cancelled (exclude In Progress) — matches Summary Fail Rate.
+        _slot_resolved = (slot_df['Total_FR'] - slot_df['InProgress_FR'])
         slot_df['Cancel Rate %'] = (
             slot_df['Cancelled_FR'] /
-            slot_df['Total_FR'].where(slot_df['Total_FR'] > 0) * 100
+            _slot_resolved.where(_slot_resolved > 0) * 100
         ).round(1).fillna(0)
         slot_df['Revenue Share %'] = (
             slot_df['Revenue'] / slot_df['Revenue'].sum() * 100
@@ -2767,7 +2862,7 @@ with tab_branch_drill:
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 💬 ASK AI ANALYST TAB
-# Conversational RAG console powered by Google Gemini (free tier).
+# Conversational RAG console powered by Groq (free, works worldwide).
 # Context is rebuilt from the live filtered dataframes on every message so the
 # model always reasons over the exact data slice the user is currently viewing.
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2780,7 +2875,7 @@ with tab_ai:
     )
 
     # ── Resolve API key: secrets file takes priority over manual input ────────
-    # If GEMINI_API_KEY is set in .streamlit/secrets.toml (or Streamlit Cloud
+    # If GROQ_API_KEY is set in .streamlit/secrets.toml (or Streamlit Cloud
     # secrets), it is used silently for every visitor — no input field shown.
     # Only when the key is absent from secrets does the manual input field appear.
     try:
