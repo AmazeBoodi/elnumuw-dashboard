@@ -489,32 +489,44 @@ inp_cur  = len(o_cur_fr[o_cur_fr['Status'].isin(IN_PROGRESS_STATUSES)])
 rej_cur  = len(o_cur_fr[o_cur_fr['Status'].isin(REJECTED_STATUSES)])
 disc_cur = o_cur['Discount'].sum()
 net_cur  = rev_cur - disc_cur
+aov_cur  = (rev_cur / ord_cur) if ord_cur > 0 else 0.0
+# Cancel Rate = cancelled ÷ (completed + cancelled) — excludes In Progress (same as Fill Rate)
+_cr_denom_cur    = comp_cur + rej_cur
+cancel_rate_cur  = (rej_cur / _cr_denom_cur * 100) if _cr_denom_cur > 0 else 0.0
+
+aov_old         = (rev_old / ord_old) if ord_old > 0 else 0.0
+_cr_denom_old   = comp_old + rej_old
+cancel_rate_old = (rej_old / _cr_denom_old * 100) if _cr_denom_old > 0 else 0.0
 
 def _pct(cur, old):
     return ((cur - old) / old * 100) if old > 0 else 0.0
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SUMMARY KPI TILES (6)
+# SUMMARY KPI TILES (8)
 # ══════════════════════════════════════════════════════════════════════════════
-k_cols = st.columns(6)
+k_cols = st.columns(8)
 fill_label = "🎯 Fill Rate %" + (" *" if status_user_filtered else "")
 
 if compare_on:
-    k_cols[0].metric("💰 Gross Revenue",      f"{rev_cur:,.0f} SAR", f"{_pct(rev_cur,  rev_old):+.1f}%  ·  was {rev_old:,.0f} SAR")
-    k_cols[1].metric("📦 Total Orders",        f"{ord_cur:,}",        f"{_pct(ord_cur,  ord_old):+.1f}%  ·  was {ord_old:,}")
-    k_cols[2].metric("✅ Completed",           f"{comp_cur:,}",       f"{_pct(comp_cur, comp_old):+.1f}%  ·  was {comp_old:,}")
-    k_cols[3].metric("🔄 In Progress",         f"{inp_cur:,}",        f"{_pct(inp_cur,  inp_old):+.1f}%  ·  was {inp_old:,}")
-    k_cols[4].metric("❌ Canceled",            f"{rej_cur:,}",        f"{_pct(rej_cur,  rej_old):+.1f}%  ·  was {rej_old:,}", delta_color="inverse")
-    k_cols[5].metric(fill_label,               f"{fill_cur:.1f}%",    f"{(fill_cur - fill_old):+.1f} pp  ·  was {fill_old:.1f}%")
-    st.caption(f"Current period: **{net_cur:,.0f} SAR** net revenue · Previous: **{net_old:,.0f} SAR** · Fill Rate excludes In Progress orders (outcome still unknown)")
+    k_cols[0].metric("💰 Revenue",       f"{rev_cur:,.0f}",       f"{_pct(rev_cur,  rev_old):+.1f}%  ·  was {rev_old:,.0f}")
+    k_cols[1].metric("📦 Total Orders",  f"{ord_cur:,}",           f"{_pct(ord_cur,  ord_old):+.1f}%  ·  was {ord_old:,}")
+    k_cols[2].metric("✅ Completed",     f"{comp_cur:,}",           f"{_pct(comp_cur, comp_old):+.1f}%  ·  was {comp_old:,}")
+    k_cols[3].metric("🔄 In Progress",  f"{inp_cur:,}",            f"{_pct(inp_cur,  inp_old):+.1f}%  ·  was {inp_old:,}")
+    k_cols[4].metric("❌ Canceled",      f"{rej_cur:,}",            f"{_pct(rej_cur,  rej_old):+.1f}%  ·  was {rej_old:,}", delta_color="inverse")
+    k_cols[5].metric("💳 AOV (SAR)",     f"{aov_cur:,.0f}",        f"{_pct(aov_cur, aov_old):+.1f}%  ·  was {aov_old:,.0f}")
+    k_cols[6].metric(fill_label,         f"{fill_cur:.1f}%",        f"{(fill_cur - fill_old):+.1f} pp  ·  was {fill_old:.1f}%")
+    k_cols[7].metric("📉 Fail Rate",     f"{cancel_rate_cur:.1f}%", f"{(cancel_rate_cur - cancel_rate_old):+.1f} pp  ·  was {cancel_rate_old:.1f}%", delta_color="inverse")
+    st.caption(f"Current period: **{net_cur:,.0f} SAR** net revenue · Previous: **{net_old:,.0f} SAR** · Fill Rate & Fail Rate exclude In Progress orders (outcome still unknown)")
 else:
-    k_cols[0].metric("💰 Gross Revenue", f"{rev_cur:,.0f} SAR")
-    k_cols[1].metric("📦 Total Orders",   f"{ord_cur:,}")
-    k_cols[2].metric("✅ Completed",      f"{comp_cur:,}")
-    k_cols[3].metric("🔄 In Progress",    f"{inp_cur:,}")
-    k_cols[4].metric("❌ Canceled",       f"{rej_cur:,}")
-    k_cols[5].metric(fill_label,          f"{fill_cur:.1f}%")
-    st.caption(f"Net revenue this period: **{net_cur:,.0f} SAR** · Fill Rate excludes In Progress orders (outcome still unknown)")
+    k_cols[0].metric("💰 Revenue",      f"{rev_cur:,.0f}")
+    k_cols[1].metric("📦 Total Orders", f"{ord_cur:,}")
+    k_cols[2].metric("✅ Completed",    f"{comp_cur:,}")
+    k_cols[3].metric("🔄 In Progress", f"{inp_cur:,}")
+    k_cols[4].metric("❌ Canceled",     f"{rej_cur:,}")
+    k_cols[5].metric("💳 AOV (SAR)",    f"{aov_cur:,.0f}")
+    k_cols[6].metric(fill_label,        f"{fill_cur:.1f}%")
+    k_cols[7].metric("📉 Fail Rate",    f"{cancel_rate_cur:.1f}%")
+    st.caption(f"Net revenue this period: **{net_cur:,.0f} SAR** · Fill Rate & Fail Rate exclude In Progress orders (outcome still unknown)")
 
 if status_user_filtered:
     st.caption("* Fill Rate is always calculated using all order statuses — even if you have filtered by status in the sidebar. This is intentional: if we only counted 'Completed' orders, Fill Rate would always show 100%, which would be meaningless.")
@@ -864,6 +876,103 @@ with tab_summary:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="exp_summary",
         )
+
+        # ── DIMENSION SUMMARY TABLES ─────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("### 📋 Performance Snapshot by Dimension")
+
+        def _build_snapshot(cur_df, cur_fr_df, dim_col):
+            """Compact Revenue / Orders / AOV / Fill Rate / Fail Rate per dimension."""
+            base = cur_df.groupby(dim_col).agg(
+                Revenue=('Sales',    'sum'),
+                Orders =('Order ID', 'count'),
+            ).reset_index()
+            base['AOV'] = (base['Revenue'] / base['Orders'].where(base['Orders'] > 0)).round(0)
+            # Fill/fail rates from the status-unfiltered slice
+            fr = cur_fr_df.groupby(dim_col).agg(
+                _Comp=('Status', lambda s: (s == 'Completed').sum()),
+                _Canc=('Status', lambda s: s.isin(REJECTED_STATUSES).sum()),
+            ).reset_index()
+            _raw_denom = fr['_Comp'] + fr['_Canc']
+            _denom = _raw_denom.where(_raw_denom > 0)
+            fr['Fill Rate %'] = (fr['_Comp'] / _denom * 100).fillna(100).round(1)
+            fr['Fail Rate %'] = (fr['_Canc'] / _denom * 100).fillna(0).round(1)
+            result = base.merge(fr[[dim_col, 'Fill Rate %', 'Fail Rate %']], on=dim_col, how='left')
+            return result.sort_values('Revenue', ascending=False).reset_index(drop=True)
+
+        def _render_snapshot(df, dim_col):
+            """Render a compact snapshot table with green/red cell shading (no matplotlib)."""
+            fmt = {
+                'Revenue':     '{:,.0f}',
+                'Orders':      '{:,}',
+                'AOV':         '{:,.0f}',
+                'Fill Rate %': '{:.1f}%',
+                'Fail Rate %': '{:.1f}%',
+            }
+            col_rename = {dim_col: dim_col, 'Revenue': 'Revenue (SAR)', 'Orders': 'Orders',
+                          'AOV': 'AOV (SAR)', 'Fill Rate %': 'Fill %', 'Fail Rate %': 'Fail %'}
+            disp = df.rename(columns=col_rename)
+
+            def _fill_color(col):
+                """Green = high fill rate, red = low fill rate (60–100 range)."""
+                def _one(v):
+                    try:
+                        t = max(0.0, min(1.0, (float(v) - 60) / 40))  # 60→0, 100→1
+                        r = int(239 - t * (239 - 34))
+                        g = int(68  + t * (197 - 68))
+                        return f'background-color:rgba({r},{g},68,0.35)'
+                    except Exception:
+                        return ''
+                return col.map(_one)
+
+            def _fail_color(col):
+                """Red = high fail rate, green = low fail rate (0–40 range)."""
+                def _one(v):
+                    try:
+                        t = max(0.0, min(1.0, float(v) / 40))  # 0→0, 40→1
+                        r = int(34  + t * (239 - 34))
+                        g = int(197 - t * (197 - 68))
+                        return f'background-color:rgba({r},{g},68,0.35)'
+                    except Exception:
+                        return ''
+                return col.map(_one)
+
+            styled = (
+                disp.style
+                .format({col_rename.get(k, k): v for k, v in fmt.items()}, na_rep='—')
+                .apply(_fill_color, subset=['Fill %'])
+                .apply(_fail_color, subset=['Fail %'])
+            )
+            st.dataframe(
+                styled,
+                use_container_width=True,
+                hide_index=True,
+                height=min(500, 60 + 35 * len(df)),
+            )
+
+        _sn_c1, _sn_c2 = st.columns(2)
+        with _sn_c1:
+            st.markdown("#### 🏷️ By Brand")
+            _snap_brand = _build_snapshot(o_cur, o_cur_fr, 'Brand')
+            _render_snapshot(_snap_brand, 'Brand')
+
+        with _sn_c2:
+            st.markdown("#### 📍 By Branch")
+            _snap_branch = _build_snapshot(o_cur, o_cur_fr, 'Location')
+            _snap_branch = _snap_branch.rename(columns={'Location': 'Branch'})
+            _render_snapshot(_snap_branch, 'Branch')
+
+        _sn_c3, _sn_c4 = st.columns(2)
+        with _sn_c3:
+            st.markdown("#### 🚚 By Aggregator")
+            _snap_prov = _build_snapshot(o_cur, o_cur_fr, 'Provider')
+            _render_snapshot(_snap_prov, 'Provider')
+
+        with _sn_c4:
+            st.markdown("#### ⚙️ By Technology")
+            _snap_tech = _build_snapshot(o_cur, o_cur_fr, 'Technology')
+            _render_snapshot(_snap_tech, 'Technology')
+
     else:
         st.info("No timeline data found for current filters.")
 
