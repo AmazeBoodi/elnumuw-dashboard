@@ -1954,6 +1954,18 @@ with tab_aggs:
 # ── Brands tab
 with tab_brands:
     st.markdown("### 🏷️ Brand Performance")
+    # ── Completed vs Cancelled order counts (current filter) ────────────────
+    _brm = st.columns(4)
+    if compare_on:
+        _brm[0].metric("✅ Completed Orders", f"{comp_cur:,}",
+                       f"{_pct(comp_cur, comp_old):+.1f}%  ·  was {comp_old:,}")
+        _brm[1].metric("❌ Cancelled Orders", f"{rej_cur:,}",
+                       f"{_pct(rej_cur, rej_old):+.1f}%  ·  was {rej_old:,}",
+                       delta_color="inverse")
+    else:
+        _brm[0].metric("✅ Completed Orders", f"{comp_cur:,}")
+        _brm[1].metric("❌ Cancelled Orders", f"{rej_cur:,}")
+
     df_brand = build_dim_comparison(o_cur, o_old, 'Brand', compare_on)
     # ── % contribution to total sales ──────────────────────────────────────
     _brand_total = df_brand['Sales'].sum()
@@ -2002,6 +2014,18 @@ with tab_brands:
 # ── Technologies tab
 with tab_tech:
     st.markdown("### ⚙️ Technology / Channel Performance")
+    # ── Completed vs Cancelled order counts (current filter) ────────────────
+    _tm = st.columns(4)
+    if compare_on:
+        _tm[0].metric("✅ Completed Orders", f"{comp_cur:,}",
+                      f"{_pct(comp_cur, comp_old):+.1f}%  ·  was {comp_old:,}")
+        _tm[1].metric("❌ Cancelled Orders", f"{rej_cur:,}",
+                      f"{_pct(rej_cur, rej_old):+.1f}%  ·  was {rej_old:,}",
+                      delta_color="inverse")
+    else:
+        _tm[0].metric("✅ Completed Orders", f"{comp_cur:,}")
+        _tm[1].metric("❌ Cancelled Orders", f"{rej_cur:,}")
+
     df_tech = build_dim_comparison(o_cur, o_old, 'Technology', compare_on)
 
     def _tech_charts(df):
@@ -3005,10 +3029,12 @@ with tab_ai:
             _sandbox = {
                 "__builtins__": _SAFE_BUILTINS,
                 "pd": pd,
-                "o_cur": o_cur.copy(),            # current-period filtered orders
-                "i_cur": i_cur.copy(),            # current-period filtered items
+                "o_cur": o_cur.copy(),            # current-period orders (respects all filters incl. Status)
+                "i_cur": i_cur.copy(),            # current-period items
+                "o_cur_fr": o_cur_fr.copy(),      # current-period orders IGNORING the Status filter
                 "o_old": o_old.copy(),            # previous-period orders (empty if compare off)
                 "i_old": i_old.copy(),            # previous-period items   (empty if compare off)
+                "o_old_fr": o_old_fr.copy(),      # previous-period orders ignoring the Status filter
                 "compare_on": bool(compare_on),   # True when period comparison is active
                 "result": None,
             }
@@ -3036,14 +3062,15 @@ with tab_ai:
                         "code": {
                             "type": "string",
                             "description": (
-                                "Python pandas code. Available variables: `o_cur` (current-period "
-                                "filtered orders), `i_cur` (current-period items), `o_old` "
-                                "(previous-period orders), `i_old` (previous-period items), "
-                                "`compare_on` (bool, True when period comparison is active) and "
-                                "`pd`. For any period-over-period / growth / 'vs previous' question, "
-                                "use o_old and i_old (and check compare_on first). Assign the final "
-                                "answer to a variable named `result` (a number, a pandas Series, or "
-                                "a DataFrame). No imports, no file/network/OS access, no while-loops."
+                                "Python pandas code. Available variables: `o_cur` (current orders, "
+                                "respects all filters), `i_cur` (current items), `o_cur_fr` (current "
+                                "orders IGNORING the Status filter — use for Fill/Cancel rates), "
+                                "`o_old`/`i_old` (previous-period orders/items), `o_old_fr` (previous "
+                                "orders ignoring Status filter), `compare_on` (bool) and `pd`. For "
+                                "period-over-period / growth questions use o_old (check compare_on "
+                                "first). Assign the final answer to `result` (a number, a pandas "
+                                "Series, or a DataFrame). No imports, no file/network/OS access, no "
+                                "while-loops."
                             ),
                         },
                     },
@@ -3097,16 +3124,35 @@ with tab_ai:
             _o_schema = _schema(o_cur, "o_cur (current-period orders)")
             _i_schema = (_schema(i_cur, "i_cur (current-period items)") if not i_cur.empty
                          else "  i_cur (current-period items): (empty under the current filter)")
+            def _filter_summary():
+                _parts = [f"Date range: {sd} to {ed}"]
+                for _lbl, _act, _key in [("Brands", active_brands, "Brand"),
+                                          ("Branches", active_locs, "Location"),
+                                          ("Providers", active_provs, "Provider"),
+                                          ("Technologies", active_techs, "Technology"),
+                                          ("Statuses", active_status, "Status")]:
+                    _all = ALL_OPTS.get(_key, [])
+                    if _act and len(_act) < len(_all):
+                        _shown = ", ".join(map(str, list(_act)[:8]))
+                        _parts.append(f"{_lbl}: {_shown}" + (" (+more)" if len(_act) > 8 else ""))
+                    else:
+                        _parts.append(f"{_lbl}: all")
+                return "\n  ".join(_parts)
             _cat_vals = _cats(o_cur, ["Brand", "Location", "Provider", "Technology", "Status"])
             return f"""You are a senior business-intelligence consultant for Alnumuw, a Saudi multi-brand restaurant group. You answer with EXACT, computed figures — never estimates or guesses.
 
 You have one tool: `run_pandas`. For ANY question that needs a number, total, average, rate, ranking, breakdown or comparison, you MUST call `run_pandas` with code that computes it and assigns the answer to `result`. Never do arithmetic yourself.
 
+CURRENT VIEW — the user is looking at exactly this slice; everything you compute is within it:
+  {_filter_summary()}
+
 DATAFRAMES available to your code (o_cur / i_cur are already filtered to the user's current view):
 {_o_schema}
 {_i_schema}
+  o_cur_fr — current-period orders IGNORING any Status filter; rows: {len(o_cur_fr):,}. USE THIS for Fill Rate / Cancel Rate so they match the dashboard tiles.
   o_old (previous-period orders) — same columns as o_cur; rows: {len(o_old):,}
   i_old (previous-period items)  — same columns as i_cur; rows: {len(i_old):,}
+  o_old_fr — previous-period orders ignoring the Status filter; rows: {len(o_old_fr):,}
 
 PERIOD COMPARISON:
   compare_on is currently {compare_on}.
@@ -3130,30 +3176,37 @@ STATUS GROUPS (filter exactly like this):
   In Progress : o_cur['Status'].isin({sorted(IN_PROGRESS_STATUSES)})
   Completed   : o_cur['Status'] == 'Completed'
 
-METRIC DEFINITIONS (compute exactly like the dashboard does):
+METRIC DEFINITIONS (compute EXACTLY like the dashboard):
   Revenue       = o_cur['Sales'].sum()
-  AOV           = Sales sum / number of orders
-  Fill Rate %   = completed / (completed + cancelled) * 100   (exclude In Progress)
-  Cancel/Fail % = cancelled / (completed + cancelled) * 100   (exclude In Progress)
+  AOV           = o_cur['Sales'].sum() / len(o_cur)
+  Fill Rate %   = completed / (completed + cancelled) * 100   (use o_cur_fr; exclude In Progress)
+  Cancel/Fail % = cancelled / (completed + cancelled) * 100   (use o_cur_fr; exclude In Progress)
   Item revenue  = i_cur['Total Amount'] ;  Item quantity = i_cur['Quantity']
+
+WORKED EXAMPLES (follow these patterns):
+  # Cancellation rate by brand (rates use o_cur_fr and exclude In Progress)
+  d = o_cur_fr[o_cur_fr['Status'] != 'In Progress']
+  g = d.groupby('Brand')['Status'].apply(lambda s: s.isin({sorted(REJECTED_STATUSES)}).sum() / len(s) * 100)
+  result = g.sort_values(ascending=False).round(1)
+  # Revenue by aggregator, ranked
+  result = o_cur.groupby('Provider')['Sales'].sum().sort_values(ascending=False).round(0)
+  # Revenue growth vs previous period
+  result = round((o_cur['Sales'].sum() - o_old['Sales'].sum()) / o_old['Sales'].sum() * 100, 1)
 
 HOW TO ANSWER:
 1. Briefly acknowledge the request in natural language (the `explanation` field), e.g. "Let me calculate that revenue breakdown for you."
-2. Call run_pandas with correct code that sets `result`.
-3. After you see the computed result, write a concise, professional answer (under ~200 words, markdown) that states the EXACT numbers and adds one short, useful insight or recommendation. Be warm and consultative — a real analyst, not a terminal.
+2. Call run_pandas ONCE with correct code that sets `result`. Call it a second time ONLY if the first code raised an error.
+3. As soon as you have the result, STOP calling the tool and write your final answer (under ~200 words, markdown): state the EXACT numbers, then ONE sharp, SPECIFIC insight grounded in the data — name the outlier, quantify the gap vs the group average, or flag a concrete risk. Avoid generic filler like "consider optimising this". Use a markdown table or bullets for 3+ items. Be warm and consultative — a real analyst, not a terminal.
+
+CURRENCY & NUMBERS: All money is in SAR (Saudi Riyals). Always write amounts as "SAR 1,234" (never "$"), using thousands separators and at most 2 decimals.
 
 CONVERSATION: If the user simply greets you, thanks you, or asks what you can do, reply briefly and warmly in plain language WITHOUT calling the tool — then invite them to ask a question about their data. Use run_pandas only when the question actually needs real numbers."""
 
-        # ── Replay prior turns (re-render any stored computed results too) ─────
+        # ── Replay prior turns (clean — written answers only) ──────────────────
         for _msg in st.session_state.chat_history:
             with st.chat_message(_msg["role"]):
                 if _msg.get("content"):
                     st.markdown(_msg["content"])
-                if _msg.get("result") is not None:
-                    _render_result(_msg["result"])
-                if _msg.get("code"):
-                    with st.expander("🔍 Show the calculation"):
-                        st.code(_msg["code"], language="python")
 
         # A click on an example chip queues that question for this run.
         _pending_q = st.session_state.pop("_ai_pending_q", None)
@@ -3213,8 +3266,20 @@ CONVERSATION: If the user simply greets you, thanks you, or asks what you can do
 
             # ── Assistant turn: the tool-calling loop ─────────────────────────
             with st.chat_message("assistant"):
-                _final_text = None
-                _exec_records = []     # [{explanation, code, result, error}]
+                _final_text = ""
+                _did_compute = False
+                _shown_expl = False
+
+                def _stream_text(_resp):
+                    # Yield text deltas from a Groq streaming response for st.write_stream.
+                    for _chunk in _resp:
+                        try:
+                            _piece = _chunk.choices[0].delta.content or ""
+                        except (IndexError, AttributeError):
+                            _piece = ""
+                        if _piece:
+                            yield _piece
+
                 try:
                     from groq import Groq as _Groq
                     _client = _Groq(api_key=ai_key)
@@ -3226,35 +3291,32 @@ CONVERSATION: If the user simply greets you, thanks you, or asks what you can do
                             _messages.append({"role": _m["role"], "content": _m["content"]})
                     _messages.append({"role": "user", "content": _user_input})
 
-                    # Up to 3 rounds: generate code -> execute -> explain, with
-                    # self-correction if the generated code raises an error.
+                    # ── Phase 1: computation rounds (non-streaming, tools on) ──
+                    # We compute once; the loop only repeats to let the model
+                    # self-correct if its generated code raised an error.
                     for _round in range(3):
                         with st.spinner("Analysing your data …"):
                             _resp = _client.chat.completions.create(
                                 model="llama-3.3-70b-versatile",
-                                messages=_messages,
-                                tools=_AI_TOOLS,
-                                tool_choice="auto",
-                                temperature=0.0,        # deterministic code + answers
-                                max_tokens=1500,
+                                messages=_messages, tools=_AI_TOOLS,
+                                tool_choice="auto", temperature=0.0, max_tokens=1500,
                             )
                         _rmsg = _resp.choices[0].message
                         _calls = _rmsg.tool_calls or []
                         if not _calls:
-                            _final_text = _rmsg.content or ""
+                            _final_text = _rmsg.content or ""   # direct reply (greeting / no compute)
                             break
                         # Echo the assistant's tool-call turn back into the thread.
                         _messages.append({
-                            "role": "assistant",
-                            "content": _rmsg.content or "",
+                            "role": "assistant", "content": _rmsg.content or "",
                             "tool_calls": [
                                 {"id": _tc.id, "type": "function",
                                  "function": {"name": _tc.function.name,
                                               "arguments": _tc.function.arguments}}
-                                for _tc in _calls
-                            ],
+                                for _tc in _calls],
                         })
                         # ---- LOCAL CODE EXECUTION happens here ----------------
+                        _had_error = False
                         for _tc in _calls:
                             try:
                                 _args = json.loads(_tc.function.arguments or "{}")
@@ -3262,45 +3324,46 @@ CONVERSATION: If the user simply greets you, thanks you, or asks what you can do
                                 _args = {}
                             _expl = (_args.get("explanation") or "").strip()
                             _code = _args.get("code") or ""
-                            if _expl:
+                            if _expl and not _shown_expl:        # acknowledge ONCE
                                 st.markdown(f"_{_expl}_")
+                                _shown_expl = True
                             try:
-                                _res = _run_ai_code(_code)
-                                _payload = _serialize_for_model(_res)
-                                _exec_records.append({"explanation": _expl, "code": _code,
-                                                      "result": _res, "error": None})
+                                _payload = _serialize_for_model(_run_ai_code(_code))
                             except Exception as _ce:
-                                _res = None
                                 _payload = f"ERROR running code: {_ce}"
-                                _exec_records.append({"explanation": _expl, "code": _code,
-                                                      "result": None, "error": str(_ce)})
+                                _had_error = True
                             _messages.append({
                                 "role": "tool", "tool_call_id": _tc.id,
                                 "name": "run_pandas", "content": _payload,
                             })
-                    if _final_text is None:
-                        _final_text = ("I ran the calculation but couldn't finalise a written "
-                                       "summary — here is the computed result below.")
+                        _did_compute = True
+                        if not _had_error:
+                            break                                # computed cleanly -> write answer
+
+                    # ── Phase 2: stream the final written answer (tool-free) ───
+                    if _did_compute:
+                        _answer_stream = _client.chat.completions.create(
+                            model="llama-3.3-70b-versatile",
+                            messages=_messages + [{
+                                "role": "user",
+                                "content": ("Using the computed results above, write the final answer "
+                                            "for the user now in natural language. Do NOT call any tool."),
+                            }],
+                            temperature=0.0, max_tokens=1500, stream=True,
+                        )
+                        _final_text = st.write_stream(_stream_text(_answer_stream))
+                    else:
+                        if not _final_text:
+                            _final_text = "I couldn't produce an answer — please try rephrasing your question."
+                        st.markdown(_final_text)
                 except Exception as _err:
                     _final_text = (f"⚠️ **AI error:**\n\n```\n{_err}\n```\n\n"
                                    "Check that your Groq API key is valid "
                                    "([console.groq.com](https://console.groq.com)).")
+                    st.markdown(_final_text)
 
-                # ---- (5) UI RENDER: answer + computed data + transparency -----
-                st.markdown(_final_text)
-                _last = next((r for r in reversed(_exec_records) if r["result"] is not None), None)
-                if _last is not None:
-                    _render_result(_last["result"])
-                    with st.expander("🔍 Show the calculation"):
-                        st.code(_last["code"], language="python")
-
-            # Persist the assistant turn (text + last computed result for replay).
-            st.session_state.chat_history.append({
-                "role": "assistant",
-                "content": _final_text,
-                "result": (_last["result"] if _last is not None else None),
-                "code":   (_last["code"]   if _last is not None else None),
-            })
+            # Persist the assistant turn (text only — keeps the history clean).
+            st.session_state.chat_history.append({"role": "assistant", "content": _final_text})
 
         # ── Clear conversation ─────────────────────────────────────────────────
         if st.session_state.get("chat_history"):
