@@ -762,6 +762,8 @@ def render_dim_tab(df_raw, dim_label, compare_on, tab_key, extra_charts_fn=None)
 
     # ── Table ───────────────────────────────────────────────────────────────
     _has_share = 'Share %' in df.columns
+    _has_comp  = 'Completed' in df.columns
+    _has_canc  = 'Cancelled' in df.columns
     if compare_on and 'Sales vs Prev %' in df.columns:
         _has_prev = '_PrevSales' in df.columns
         _vfmt = {'Sales': '{:,.0f}', 'Orders': '{:,}', 'AOV': '{:,.0f}'}
@@ -777,6 +779,12 @@ def render_dim_tab(df_raw, dim_label, compare_on, tab_key, extra_charts_fn=None)
         if _has_share:
             _vfmt['Share %'] = '{:.1f}%'
             _clabels['Share %'] = 'Share %'
+        if _has_comp:
+            _vfmt['Completed'] = '{:,}'
+            _clabels['Completed'] = 'Completed'
+        if _has_canc:
+            _vfmt['Cancelled'] = '{:,}'
+            _clabels['Cancelled'] = 'Cancelled'
         render_comparison_table(
             df,
             growth_map={'Sales':  'Sales vs Prev %',
@@ -798,16 +806,20 @@ def render_dim_tab(df_raw, dim_label, compare_on, tab_key, extra_charts_fn=None)
     else:
         vfmt = {c: v for c, v in
                 {'Sales': '{:,.0f}', 'Orders': '{:,}', 'AOV': '{:,.0f}',
-                 'Share %': '{:.1f}%'}.items()
+                 'Share %': '{:.1f}%', 'Completed': '{:,}', 'Cancelled': '{:,}'}.items()
                 if c in df.columns}
         col_cfg = {
-            dim_label: st.column_config.TextColumn(dim_label),
-            'Sales':   st.column_config.TextColumn('Sales (SAR)'),
-            'Orders':  st.column_config.TextColumn('Orders'),
-            'AOV':     st.column_config.TextColumn('AOV (SAR)'),
+            dim_label:   st.column_config.TextColumn(dim_label),
+            'Sales':     st.column_config.TextColumn('Sales (SAR)'),
+            'Orders':    st.column_config.TextColumn('Orders'),
+            'AOV':       st.column_config.TextColumn('AOV (SAR)'),
         }
         if _has_share:
-            col_cfg['Share %'] = st.column_config.TextColumn('Share %')
+            col_cfg['Share %']   = st.column_config.TextColumn('Share %')
+        if _has_comp:
+            col_cfg['Completed'] = st.column_config.TextColumn('Completed')
+        if _has_canc:
+            col_cfg['Cancelled'] = st.column_config.TextColumn('Cancelled')
         st.dataframe(
             df.style.format(vfmt, na_rep='—'),
             use_container_width=True,
@@ -1892,19 +1904,6 @@ with tab_branches:
 # ── Aggregators tab
 with tab_aggs:
     st.markdown("### 🚚 Aggregator Performance")
-    # ── Completed vs Cancelled order counts (current filter; In Progress excluded
-    # from neither — these are raw status counts across all aggregators) ────────
-    _am = st.columns(4)
-    if compare_on:
-        _am[0].metric("✅ Completed Orders", f"{comp_cur:,}",
-                      f"{_pct(comp_cur, comp_old):+.1f}%  ·  was {comp_old:,}")
-        _am[1].metric("❌ Cancelled Orders", f"{rej_cur:,}",
-                      f"{_pct(rej_cur, rej_old):+.1f}%  ·  was {rej_old:,}",
-                      delta_color="inverse")
-    else:
-        _am[0].metric("✅ Completed Orders", f"{comp_cur:,}")
-        _am[1].metric("❌ Cancelled Orders", f"{rej_cur:,}")
-
     df_agg = build_dim_comparison(o_cur, o_old, 'Provider', compare_on)
     df_agg = df_agg.rename(columns={'Provider': 'Aggregator'})
     # ── % contribution to total sales ──────────────────────────────────────
@@ -1914,6 +1913,15 @@ with tab_aggs:
         'Share %',
         (df_agg['Sales'] / _agg_total * 100).round(1) if _agg_total > 0 else 0.0,
     )
+    # ── Per-aggregator Completed / Cancelled (from status-unfiltered slice) ─
+    _agg_comp = (o_cur_fr[o_cur_fr['Status'] == 'Completed']
+                 .groupby('Provider').size().rename('Completed'))
+    _agg_canc = (o_cur_fr[o_cur_fr['Status'].isin(REJECTED_STATUSES)]
+                 .groupby('Provider').size().rename('Cancelled'))
+    _agg_comp.index.name = 'Aggregator'; _agg_canc.index.name = 'Aggregator'
+    df_agg = df_agg.join(_agg_comp, on='Aggregator').join(_agg_canc, on='Aggregator')
+    df_agg['Completed'] = df_agg['Completed'].fillna(0).astype(int)
+    df_agg['Cancelled'] = df_agg['Cancelled'].fillna(0).astype(int)
 
     def _agg_charts(df):
         if df.empty:
@@ -1954,18 +1962,6 @@ with tab_aggs:
 # ── Brands tab
 with tab_brands:
     st.markdown("### 🏷️ Brand Performance")
-    # ── Completed vs Cancelled order counts (current filter) ────────────────
-    _brm = st.columns(4)
-    if compare_on:
-        _brm[0].metric("✅ Completed Orders", f"{comp_cur:,}",
-                       f"{_pct(comp_cur, comp_old):+.1f}%  ·  was {comp_old:,}")
-        _brm[1].metric("❌ Cancelled Orders", f"{rej_cur:,}",
-                       f"{_pct(rej_cur, rej_old):+.1f}%  ·  was {rej_old:,}",
-                       delta_color="inverse")
-    else:
-        _brm[0].metric("✅ Completed Orders", f"{comp_cur:,}")
-        _brm[1].metric("❌ Cancelled Orders", f"{rej_cur:,}")
-
     df_brand = build_dim_comparison(o_cur, o_old, 'Brand', compare_on)
     # ── % contribution to total sales ──────────────────────────────────────
     _brand_total = df_brand['Sales'].sum()
@@ -1974,6 +1970,14 @@ with tab_brands:
         'Share %',
         (df_brand['Sales'] / _brand_total * 100).round(1) if _brand_total > 0 else 0.0,
     )
+    # ── Per-brand Completed / Cancelled (from status-unfiltered slice) ──────
+    _br_comp = (o_cur_fr[o_cur_fr['Status'] == 'Completed']
+                .groupby('Brand').size().rename('Completed'))
+    _br_canc = (o_cur_fr[o_cur_fr['Status'].isin(REJECTED_STATUSES)]
+                .groupby('Brand').size().rename('Cancelled'))
+    df_brand = df_brand.join(_br_comp, on='Brand').join(_br_canc, on='Brand')
+    df_brand['Completed'] = df_brand['Completed'].fillna(0).astype(int)
+    df_brand['Cancelled'] = df_brand['Cancelled'].fillna(0).astype(int)
 
     def _brand_charts(df):
         if df.empty:
@@ -2014,19 +2018,15 @@ with tab_brands:
 # ── Technologies tab
 with tab_tech:
     st.markdown("### ⚙️ Technology / Channel Performance")
-    # ── Completed vs Cancelled order counts (current filter) ────────────────
-    _tm = st.columns(4)
-    if compare_on:
-        _tm[0].metric("✅ Completed Orders", f"{comp_cur:,}",
-                      f"{_pct(comp_cur, comp_old):+.1f}%  ·  was {comp_old:,}")
-        _tm[1].metric("❌ Cancelled Orders", f"{rej_cur:,}",
-                      f"{_pct(rej_cur, rej_old):+.1f}%  ·  was {rej_old:,}",
-                      delta_color="inverse")
-    else:
-        _tm[0].metric("✅ Completed Orders", f"{comp_cur:,}")
-        _tm[1].metric("❌ Cancelled Orders", f"{rej_cur:,}")
-
     df_tech = build_dim_comparison(o_cur, o_old, 'Technology', compare_on)
+    # ── Per-technology Completed / Cancelled (from status-unfiltered slice) ─
+    _tc_comp = (o_cur_fr[o_cur_fr['Status'] == 'Completed']
+                .groupby('Technology').size().rename('Completed'))
+    _tc_canc = (o_cur_fr[o_cur_fr['Status'].isin(REJECTED_STATUSES)]
+                .groupby('Technology').size().rename('Cancelled'))
+    df_tech = df_tech.join(_tc_comp, on='Technology').join(_tc_canc, on='Technology')
+    df_tech['Completed'] = df_tech['Completed'].fillna(0).astype(int)
+    df_tech['Cancelled'] = df_tech['Cancelled'].fillna(0).astype(int)
 
     def _tech_charts(df):
         if df.empty:
@@ -3202,40 +3202,46 @@ CURRENCY & NUMBERS: All money is in SAR (Saudi Riyals). Always write amounts as 
 
 CONVERSATION: If the user simply greets you, thanks you, or asks what you can do, reply briefly and warmly in plain language WITHOUT calling the tool — then invite them to ask a question about their data. Use run_pandas only when the question actually needs real numbers."""
 
-        # ── Replay prior turns (clean — written answers only) ──────────────────
-        for _msg in st.session_state.chat_history:
-            with st.chat_message(_msg["role"]):
-                if _msg.get("content"):
-                    st.markdown(_msg["content"])
-
         # A click on an example chip queues that question for this run.
         _pending_q = st.session_state.pop("_ai_pending_q", None)
 
-        # ── Friendly empty state: a warm welcome + one-click example questions ─
-        if not st.session_state.chat_history and not _pending_q:
-            with st.chat_message("assistant"):
-                st.markdown(
-                    "👋 **Hi! I'm your Alnumuw data analyst.** Ask me anything about the data "
-                    "you're currently viewing — totals, rankings, fill/cancel rates, top items, "
-                    "day-of-week or hourly patterns, or period-over-period comparisons — and I'll "
-                    "compute the exact numbers for you.\n\nTry one of these to get started:"
-                )
-                _examples = [
-                    "What's my total revenue and order count?",
-                    "Which brand has the highest cancellation rate?",
-                    "Show me revenue by aggregator.",
-                    "What are my top 5 menu items by revenue?",
-                ]
-                _ex_cols = st.columns(2)
-                for _ei, _ex in enumerate(_examples):
-                    if _ex_cols[_ei % 2].button(_ex, key=f"ai_ex_{_ei}", use_container_width=True):
-                        st.session_state["_ai_pending_q"] = _ex
-                        st.rerun()
+        # ── Declare the message container BEFORE chat_input so all messages
+        #    (history + new) render above the input box, not below it. ──────────
+        _chat_container = st.container()
 
-        # ── New question (typed input, or a queued example chip) ───────────────
+        # ── Chat input pinned below the message area ───────────────────────────
         _user_input = st.chat_input(
             "Ask anything about your data — e.g. 'Which brand had the highest cancellation rate?'"
         ) or _pending_q
+
+        # Everything below renders inside the container (above the input). ──────
+        with _chat_container:
+            # ── Friendly empty state ───────────────────────────────────────────
+            if not st.session_state.chat_history and not _user_input:
+                with st.chat_message("assistant"):
+                    st.markdown(
+                        "👋 **Hi! I'm your Alnumuw data analyst.** Ask me anything about the data "
+                        "you're currently viewing — totals, rankings, fill/cancel rates, top items, "
+                        "day-of-week or hourly patterns, or period-over-period comparisons — and I'll "
+                        "compute the exact numbers for you.\n\nTry one of these to get started:"
+                    )
+                    _examples = [
+                        "What's my total revenue and order count?",
+                        "Which brand has the highest cancellation rate?",
+                        "Show me revenue by aggregator.",
+                        "What are my top 5 menu items by revenue?",
+                    ]
+                    _ex_cols = st.columns(2)
+                    for _ei, _ex in enumerate(_examples):
+                        if _ex_cols[_ei % 2].button(_ex, key=f"ai_ex_{_ei}", use_container_width=True):
+                            st.session_state["_ai_pending_q"] = _ex
+                            st.rerun()
+
+            # ── Replay prior turns ─────────────────────────────────────────────
+            for _msg in st.session_state.chat_history:
+                with st.chat_message(_msg["role"]):
+                    if _msg.get("content"):
+                        st.markdown(_msg["content"])
 
         if _user_input:
             # ── Per-session rate limit (protects the shared Groq quota) ────────
@@ -3259,13 +3265,16 @@ CONVERSATION: If the user simply greets you, thanks you, or asks what you can do
                 st.stop()
             st.session_state.ai_call_times.append(_now)
 
-            # Show the user's bubble + record it
-            with st.chat_message("user"):
-                st.markdown(_user_input)
+            # Show the user's bubble + record it — inside the container so it
+            # appears above the chat_input, not below it.
+            with _chat_container:
+                with st.chat_message("user"):
+                    st.markdown(_user_input)
             st.session_state.chat_history.append({"role": "user", "content": _user_input})
 
             # ── Assistant turn: the tool-calling loop ─────────────────────────
-            with st.chat_message("assistant"):
+            with _chat_container:
+             with st.chat_message("assistant"):
                 _final_text = ""
                 _did_compute = False
                 _shown_expl = False
