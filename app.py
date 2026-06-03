@@ -1660,6 +1660,16 @@ with tab_items:
 with tab_branches:
     st.markdown("### 📍 Sales by Branch")
     if not o_cur.empty:
+        # ── Active branches = distinct locations with at least one order ───────
+        _active_br_cur = o_cur['Location'].nunique()
+        _bm = st.columns(4)
+        if compare_on and not o_old.empty:
+            _active_br_old = o_old['Location'].nunique()
+            _bm[0].metric("🏢 Active Branches", f"{_active_br_cur:,}",
+                          f"{_active_br_cur - _active_br_old:+d}  ·  was {_active_br_old:,}")
+        else:
+            _bm[0].metric("🏢 Active Branches", f"{_active_br_cur:,}")
+
         # Current period: sales + total orders per branch
         cur_b = o_cur.groupby('Location').agg(
             Sales=('Sales','sum'),
@@ -1882,6 +1892,19 @@ with tab_branches:
 # ── Aggregators tab
 with tab_aggs:
     st.markdown("### 🚚 Aggregator Performance")
+    # ── Completed vs Cancelled order counts (current filter; In Progress excluded
+    # from neither — these are raw status counts across all aggregators) ────────
+    _am = st.columns(4)
+    if compare_on:
+        _am[0].metric("✅ Completed Orders", f"{comp_cur:,}",
+                      f"{_pct(comp_cur, comp_old):+.1f}%  ·  was {comp_old:,}")
+        _am[1].metric("❌ Cancelled Orders", f"{rej_cur:,}",
+                      f"{_pct(rej_cur, rej_old):+.1f}%  ·  was {rej_old:,}",
+                      delta_color="inverse")
+    else:
+        _am[0].metric("✅ Completed Orders", f"{comp_cur:,}")
+        _am[1].metric("❌ Cancelled Orders", f"{rej_cur:,}")
+
     df_agg = build_dim_comparison(o_cur, o_old, 'Provider', compare_on)
     df_agg = df_agg.rename(columns={'Provider': 'Aggregator'})
     # ── % contribution to total sales ──────────────────────────────────────
@@ -2918,28 +2941,251 @@ with tab_ai:
                 "to enable it for all users automatically.\n\n"
                 "Groq is completely free, works worldwide, and is faster than Gemini."
             )
-
     if ai_key:
-        # ── Session state initialisation ──────────────────────────────────────
+        # ── Session state ─────────────────────────────────────────────────────
+        # Each history item: {role, content, result(optional), code(optional)}.
         if "chat_history" not in st.session_state:
-            st.session_state.chat_history = []   # [{role, content}, ...]
+            st.session_state.chat_history = []
 
-        # ── Render all previous turns ─────────────────────────────────────────
+        # ══════════════════════════════════════════════════════════════════════
+        # TOOL-CALLING ANALYST ENGINE
+        # The model never "guesses" numbers. For any analytical question it calls
+        # the `run_pandas` tool with code that computes the answer against the live
+        # filtered frames (o_cur = orders, i_cur = items). We execute that code in
+        # a locked-down sandbox, feed the EXACT result back to the model, and it
+        # writes the final natural-language answer. Temperature is 0.0 throughout.
+        # ══════════════════════════════════════════════════════════════════════
+        import ast, json, numbers
+
+        # ---- (1) SANDBOX: safe execution of model-generated pandas code --------
+        # Tiny builtins whitelist — no open / eval / exec / __import__ / getattr.
+        _SAFE_BUILTINS = {
+            "len": len, "sum": sum, "min": min, "max": max, "abs": abs,
+            "round": round, "sorted": sorted, "list": list, "dict": dict,
+            "set": set, "tuple": tuple, "range": range, "enumerate": enumerate,
+            "zip": zip, "map": map, "filter": filter, "float": float, "int": int,
+            "str": str, "bool": bool, "any": any, "all": all, "print": print,
+            "True": True, "False": False, "None": None,
+        }
+        # Names the generated code may never reference.
+        _BLOCKED_NAMES = {
+            "eval", "exec", "compile", "open", "__import__", "input", "globals",
+            "locals", "vars", "getattr", "setattr", "delattr", "hasattr", "exit",
+            "quit", "help", "breakpoint", "memoryview", "object", "type", "super",
+            "classmethod", "staticmethod", "property", "os", "sys", "subprocess",
+            "shutil", "socket", "importlib", "builtins", "__builtins__",
+        }
+
+        def _validate_ai_code(code):
+            """AST whitelist. Blocks imports, while-loops (DoS), private/dunder
+            attribute access (the classic sandbox-escape vector) and dangerous
+            names. Returns (ok, reason)."""
+            try:
+                _tree = ast.parse(code, mode="exec")
+            except SyntaxError as _e:
+                return False, f"syntax error: {_e}"
+            for _node in ast.walk(_tree):
+                if isinstance(_node, (ast.Import, ast.ImportFrom)):
+                    return False, "imports are not allowed"
+                if isinstance(_node, ast.While):
+                    return False, "while-loops are not allowed"
+                if isinstance(_node, ast.Attribute) and _node.attr.startswith("_"):
+                    return False, "private/dunder attribute access is not allowed"
+                if isinstance(_node, ast.Name) and _node.id in _BLOCKED_NAMES:
+                    return False, f"use of '{_node.id}' is not allowed"
+            return True, ""
+
+        def _run_ai_code(code):
+            """Run validated code in a locked namespace. Code must assign its
+            answer to `result`. Every dataframe is injected as a COPY — the live
+            dataframes can never be mutated by generated code."""
+            _ok, _why = _validate_ai_code(code)
+            if not _ok:
+                raise ValueError(_why)
+            _sandbox = {
+                "__builtins__": _SAFE_BUILTINS,
+                "pd": pd,
+                "o_cur": o_cur.copy(),            # current-period filtered orders
+                "i_cur": i_cur.copy(),            # current-period filtered items
+                "o_old": o_old.copy(),            # previous-period orders (empty if compare off)
+                "i_old": i_old.copy(),            # previous-period items   (empty if compare off)
+                "compare_on": bool(compare_on),   # True when period comparison is active
+                "result": None,
+            }
+            exec(compile(code, "<ai_analyst>", "exec"), _sandbox)
+            return _sandbox.get("result", None)
+
+        # ---- (2) TOOL DEFINITION (OpenAI / Groq function-calling schema) -------
+        _AI_TOOLS = [{
+            "type": "function",
+            "function": {
+                "name": "run_pandas",
+                "description": (
+                    "Compute an EXACT answer by running pandas code against the live, "
+                    "already-filtered dataframes. Use for ANY question needing a number, "
+                    "total, average, rate, ranking, breakdown or comparison. Never "
+                    "estimate — always compute here."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "explanation": {
+                            "type": "string",
+                            "description": "One short, friendly sentence telling the user what you are about to calculate.",
+                        },
+                        "code": {
+                            "type": "string",
+                            "description": (
+                                "Python pandas code. Available variables: `o_cur` (current-period "
+                                "filtered orders), `i_cur` (current-period items), `o_old` "
+                                "(previous-period orders), `i_old` (previous-period items), "
+                                "`compare_on` (bool, True when period comparison is active) and "
+                                "`pd`. For any period-over-period / growth / 'vs previous' question, "
+                                "use o_old and i_old (and check compare_on first). Assign the final "
+                                "answer to a variable named `result` (a number, a pandas Series, or "
+                                "a DataFrame). No imports, no file/network/OS access, no while-loops."
+                            ),
+                        },
+                    },
+                    "required": ["explanation", "code"],
+                },
+            },
+        }]
+
+        # ---- (3) RESULT HELPERS: serialise for the model, render for the user --
+        def _serialize_for_model(result, max_rows=40):
+            if result is None:
+                return "result is None — the code did not assign `result`."
+            if isinstance(result, (pd.DataFrame, pd.Series)):
+                return result.head(max_rows).to_string()
+            return str(result)
+
+        def _render_result(result):
+            """Show the computed value with native, theme-aware widgets
+            (st.metric for a single number, st.dataframe for a breakdown)."""
+            if result is None:
+                return
+            if isinstance(result, pd.DataFrame):
+                st.dataframe(result, use_container_width=True,
+                             height=min(420, 70 + 35 * min(len(result), 12)))
+            elif isinstance(result, pd.Series):
+                st.dataframe(result.rename("Value").to_frame(),
+                             use_container_width=True,
+                             height=min(420, 70 + 35 * min(len(result), 12)))
+            elif isinstance(result, numbers.Number) and not isinstance(result, bool):
+                _v = float(result)
+                _disp = f"{int(_v):,}" if _v == int(_v) else f"{_v:,.2f}"
+                st.metric("Result", _disp)
+            elif isinstance(result, dict):
+                st.json(result)
+            else:
+                st.write(result)
+
+        # ---- (4) SYSTEM PROMPT: schema-grounded, computation-first -------------
+        def _build_system_prompt():
+            def _schema(df, name):
+                _cols = "\n".join(f"    - {c}  ({df[c].dtype})" for c in df.columns)
+                return f"  {name} — {len(df):,} rows:\n{_cols}"
+            def _cats(df, cols, cap=15):
+                _out = []
+                for c in cols:
+                    if c in df.columns:
+                        _vals = [str(v) for v in df[c].dropna().unique().tolist()[:cap]]
+                        if _vals:
+                            _out.append(f"    {c}: {', '.join(_vals)}")
+                return "\n".join(_out)
+            _o_schema = _schema(o_cur, "o_cur (current-period orders)")
+            _i_schema = (_schema(i_cur, "i_cur (current-period items)") if not i_cur.empty
+                         else "  i_cur (current-period items): (empty under the current filter)")
+            _cat_vals = _cats(o_cur, ["Brand", "Location", "Provider", "Technology", "Status"])
+            return f"""You are a senior business-intelligence consultant for Alnumuw, a Saudi multi-brand restaurant group. You answer with EXACT, computed figures — never estimates or guesses.
+
+You have one tool: `run_pandas`. For ANY question that needs a number, total, average, rate, ranking, breakdown or comparison, you MUST call `run_pandas` with code that computes it and assigns the answer to `result`. Never do arithmetic yourself.
+
+DATAFRAMES available to your code (o_cur / i_cur are already filtered to the user's current view):
+{_o_schema}
+{_i_schema}
+  o_old (previous-period orders) — same columns as o_cur; rows: {len(o_old):,}
+  i_old (previous-period items)  — same columns as i_cur; rows: {len(i_old):,}
+
+PERIOD COMPARISON:
+  compare_on is currently {compare_on}.
+  - When compare_on is True, o_old / i_old hold the PREVIOUS period. Use them for any
+    "vs previous", "growth", "change" or period-over-period question — e.g.
+    growth_pct = (o_cur['Sales'].sum() - o_old['Sales'].sum()) / o_old['Sales'].sum() * 100
+  - When compare_on is False, o_old / i_old are EMPTY. If the user asks for a comparison,
+    set result to a short string telling them to turn on "Compare to previous period" in the sidebar.
+
+KEY CATEGORICAL VALUES (use exact spelling when filtering):
+{_cat_vals}
+
+DIMENSION DEFINITIONS — never confuse these:
+  BRAND = restaurant concept     -> column 'Brand'
+  BRANCH = physical location     -> column 'Location'
+  PROVIDER = delivery aggregator -> column 'Provider'
+  TECHNOLOGY = POS system        -> column 'Technology'
+
+STATUS GROUPS (filter exactly like this):
+  Cancelled   : o_cur['Status'].isin({sorted(REJECTED_STATUSES)})
+  In Progress : o_cur['Status'].isin({sorted(IN_PROGRESS_STATUSES)})
+  Completed   : o_cur['Status'] == 'Completed'
+
+METRIC DEFINITIONS (compute exactly like the dashboard does):
+  Revenue       = o_cur['Sales'].sum()
+  AOV           = Sales sum / number of orders
+  Fill Rate %   = completed / (completed + cancelled) * 100   (exclude In Progress)
+  Cancel/Fail % = cancelled / (completed + cancelled) * 100   (exclude In Progress)
+  Item revenue  = i_cur['Total Amount'] ;  Item quantity = i_cur['Quantity']
+
+HOW TO ANSWER:
+1. Briefly acknowledge the request in natural language (the `explanation` field), e.g. "Let me calculate that revenue breakdown for you."
+2. Call run_pandas with correct code that sets `result`.
+3. After you see the computed result, write a concise, professional answer (under ~200 words, markdown) that states the EXACT numbers and adds one short, useful insight or recommendation. Be warm and consultative — a real analyst, not a terminal.
+
+CONVERSATION: If the user simply greets you, thanks you, or asks what you can do, reply briefly and warmly in plain language WITHOUT calling the tool — then invite them to ask a question about their data. Use run_pandas only when the question actually needs real numbers."""
+
+        # ── Replay prior turns (re-render any stored computed results too) ─────
         for _msg in st.session_state.chat_history:
             with st.chat_message(_msg["role"]):
-                st.markdown(_msg["content"])
+                if _msg.get("content"):
+                    st.markdown(_msg["content"])
+                if _msg.get("result") is not None:
+                    _render_result(_msg["result"])
+                if _msg.get("code"):
+                    with st.expander("🔍 Show the calculation"):
+                        st.code(_msg["code"], language="python")
 
-        # ── Capture new user input ────────────────────────────────────────────
+        # A click on an example chip queues that question for this run.
+        _pending_q = st.session_state.pop("_ai_pending_q", None)
+
+        # ── Friendly empty state: a warm welcome + one-click example questions ─
+        if not st.session_state.chat_history and not _pending_q:
+            with st.chat_message("assistant"):
+                st.markdown(
+                    "👋 **Hi! I'm your Alnumuw data analyst.** Ask me anything about the data "
+                    "you're currently viewing — totals, rankings, fill/cancel rates, top items, "
+                    "day-of-week or hourly patterns, or period-over-period comparisons — and I'll "
+                    "compute the exact numbers for you.\n\nTry one of these to get started:"
+                )
+                _examples = [
+                    "What's my total revenue and order count?",
+                    "Which brand has the highest cancellation rate?",
+                    "Show me revenue by aggregator.",
+                    "What are my top 5 menu items by revenue?",
+                ]
+                _ex_cols = st.columns(2)
+                for _ei, _ex in enumerate(_examples):
+                    if _ex_cols[_ei % 2].button(_ex, key=f"ai_ex_{_ei}", use_container_width=True):
+                        st.session_state["_ai_pending_q"] = _ex
+                        st.rerun()
+
+        # ── New question (typed input, or a queued example chip) ───────────────
         _user_input = st.chat_input(
             "Ask anything about your data — e.g. 'Which brand had the highest cancellation rate?'"
-        )
+        ) or _pending_q
 
         if _user_input:
-            # ── Per-session rate limit — protects the shared Groq quota from abuse.
-            # Caps each browser session to _RATE_MAX questions per _RATE_WIN seconds.
-            # (Groq account limits + spending caps remain the server-side backstop
-            #  for abuse spread across many sessions.) The AI tab is the last thing
-            # rendered, so st.stop() here halts nothing else on the page.
+            # ── Per-session rate limit (protects the shared Groq quota) ────────
             import time as _time
             _now = _time.time()
             _RATE_WIN, _RATE_MAX = 60, 12
@@ -2960,309 +3206,106 @@ with tab_ai:
                 st.stop()
             st.session_state.ai_call_times.append(_now)
 
-            # Display the user bubble immediately
+            # Show the user's bubble + record it
             with st.chat_message("user"):
                 st.markdown(_user_input)
             st.session_state.chat_history.append({"role": "user", "content": _user_input})
 
-            # ── Build comprehensive live data context ─────────────────────────
-            _ai_orders   = len(o_cur)
-            _ai_revenue  = float(o_cur["Sales"].sum())   if "Sales"    in o_cur.columns else 0.0
-            _ai_aov      = _ai_revenue / _ai_orders      if _ai_orders > 0 else 0.0
-            _ai_discount = float(o_cur["Discount"].sum()) if "Discount" in o_cur.columns else 0.0
-            _ai_item_units = int(i_cur["Quantity"].sum()) if not i_cur.empty and "Quantity" in i_cur.columns else 0
-            _ai_item_rev   = float(i_cur["Total Amount"].sum()) if not i_cur.empty and "Total Amount" in i_cur.columns else 0.0
-            _ai_status_bkd = o_cur["Status"].value_counts().to_dict() if "Status" in o_cur.columns else {}
-            _ai_cancel_rate = (
-                _ai_status_bkd.get("Canceled", 0) + _ai_status_bkd.get("Cancelled", 0)
-            ) / max(_ai_orders, 1) * 100
-            _ai_completed = _ai_status_bkd.get("Completed", 0)
-            _ai_in_prog   = _ai_status_bkd.get("In Progress", 0)
-            _ai_cancelled = _ai_status_bkd.get("Canceled", 0) + _ai_status_bkd.get("Cancelled", 0)
-            _ai_fill_rate = _ai_completed / max(_ai_completed + _ai_cancelled, 1) * 100
-
-            # Helper: compute per-group metrics from o_cur_fr
-            def _dim_table(col):
-                if col not in o_cur_fr.columns: return pd.DataFrame()
-                _g = o_cur_fr.groupby(col)
-                _rev  = o_cur[o_cur[col].notna()].groupby(col)["Sales"].sum() if "Sales" in o_cur.columns else pd.Series(dtype=float)
-                _ord  = _g.size()
-                _comp = _g["Status"].apply(lambda s: (s == "Completed").sum())
-                _canc = _g["Status"].apply(lambda s: s.isin(REJECTED_STATUSES).sum())
-                _inp  = _g["Status"].apply(lambda s: s.isin(IN_PROGRESS_STATUSES).sum())
-                _fr   = (_comp / (_comp + _canc).where((_comp + _canc) > 0) * 100).round(1)
-                _cr   = (_canc / _ord.where(_ord > 0) * 100).round(1)
-                _aov  = (_rev  / _ord.where(_ord > 0)).round(0)
-                return pd.DataFrame({
-                    "Orders": _ord, "Revenue SAR": _rev.round(0),
-                    "AOV SAR": _aov, "Completed": _comp,
-                    "Cancelled": _canc, "In Progress": _inp,
-                    "Fill Rate %": _fr, "Cancel Rate %": _cr,
-                }).sort_values("Revenue SAR", ascending=False)
-
-            _brand_tbl = _dim_table("Brand")
-            _loc_tbl   = _dim_table("Location")
-            _prov_tbl  = _dim_table("Provider")
-            _tech_tbl  = _dim_table("Technology")
-
-            # Top menu items
-            _ai_top_items = (
-                i_cur.groupby("Items")["Total Amount"].sum()
-                .sort_values(ascending=False).head(10)
-                if not i_cur.empty and "Items" in i_cur.columns and "Total Amount" in i_cur.columns
-                else pd.Series(dtype=float)
-            )
-            _ai_top_items_qty = (
-                i_cur.groupby("Items")["Quantity"].sum()
-                .sort_values(ascending=False).head(10)
-                if not i_cur.empty and "Items" in i_cur.columns and "Quantity" in i_cur.columns
-                else pd.Series(dtype=float)
-            )
-
-            def _tbl_to_text(df, max_rows=20):
-                if df.empty: return "  No data"
-                lines = []
-                for name, row in df.head(max_rows).iterrows():
-                    parts = []
-                    for col, val in row.items():
-                        if pd.isna(val): continue
-                        if "SAR" in col or col == "Revenue":
-                            parts.append(f"{col}: {val:,.0f} SAR")
-                        elif "%" in col:
-                            parts.append(f"{col}: {val:.1f}%")
-                        else:
-                            parts.append(f"{col}: {val:,.0f}" if isinstance(val, float) else f"{col}: {val:,}")
-                    lines.append(f"  {name}: " + " | ".join(parts))
-                return "\n".join(lines)
-
-            # ── Advanced analytics for richer AI context ──────────────────────
-
-            # Revenue concentration — top 3 brands share of total
-            _rev_total = _brand_tbl["Revenue SAR"].sum() if not _brand_tbl.empty else 1
-            _top3_rev  = _brand_tbl["Revenue SAR"].head(3).sum() if not _brand_tbl.empty else 0
-            _top3_pct  = _top3_rev / max(_rev_total, 1) * 100
-
-            # Best / worst performers per dimension
-            def _best_worst(df, metric, label):
-                if df.empty or metric not in df.columns: return "N/A", "N/A"
-                valid = df[metric].dropna()
-                if valid.empty: return "N/A", "N/A"
-                return (f"{df[metric].idxmax()} ({df[metric].max():.1f}{label})",
-                        f"{df[metric].idxmin()} ({df[metric].min():.1f}{label})")
-
-            _brand_best_rev,  _brand_worst_rev   = _best_worst(_brand_tbl, "Revenue SAR",   " SAR")
-            _brand_best_fill, _brand_worst_fill  = _best_worst(_brand_tbl, "Fill Rate %",   "%")
-            _brand_best_cr,   _brand_worst_cr    = _best_worst(_brand_tbl, "Cancel Rate %", "%")
-            _brand_best_aov,  _brand_worst_aov   = _best_worst(_brand_tbl, "AOV SAR",       " SAR")
-            _loc_best_rev,    _loc_worst_rev     = _best_worst(_loc_tbl,   "Revenue SAR",   " SAR")
-            _loc_best_fill,   _loc_worst_fill    = _best_worst(_loc_tbl,   "Fill Rate %",   "%")
-            _loc_best_cr,     _loc_worst_cr      = _best_worst(_loc_tbl,   "Cancel Rate %", "%")
-            _prov_best_rev,   _prov_worst_rev    = _best_worst(_prov_tbl,  "Revenue SAR",   " SAR")
-            _prov_best_cr,    _prov_worst_cr     = _best_worst(_prov_tbl,  "Cancel Rate %", "%")
-
-            # Average benchmarks across brands / locations
-            _avg_brand_cr   = _brand_tbl["Cancel Rate %"].mean()  if not _brand_tbl.empty else 0
-            _avg_brand_fill = _brand_tbl["Fill Rate %"].mean()    if not _brand_tbl.empty else 0
-            _avg_brand_aov  = _brand_tbl["AOV SAR"].mean()        if not _brand_tbl.empty else 0
-            _avg_loc_cr     = _loc_tbl["Cancel Rate %"].mean()    if not _loc_tbl.empty  else 0
-            _avg_loc_fill   = _loc_tbl["Fill Rate %"].mean()      if not _loc_tbl.empty  else 0
-
-            # Brands/locations above-average cancel rate (risk flags)
-            _risky_brands = (
-                _brand_tbl[_brand_tbl["Cancel Rate %"] > _avg_brand_cr]["Cancel Rate %"]
-                .sort_values(ascending=False)
-                if not _brand_tbl.empty else pd.Series(dtype=float)
-            )
-            _risky_locs   = (
-                _loc_tbl[_loc_tbl["Cancel Rate %"] > _avg_loc_cr]["Cancel Rate %"]
-                .sort_values(ascending=False).head(5)
-                if not _loc_tbl.empty else pd.Series(dtype=float)
-            )
-
-            # Day-of-week order distribution
-            _dow_dist = ""
-            if "Date" in o_cur.columns:
-                _dow = o_cur.copy()
-                _dow["DOW"] = pd.to_datetime(_dow["Date"]).dt.day_name()
-                _dow_grp = _dow.groupby("DOW").agg(
-                    Orders=("Order ID","count"), Revenue=("Sales","sum")
-                ).reindex(["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]).dropna()
-                _dow_dist = "\n".join(
-                    f"  {d}: {int(r['Orders']):,} orders | {r['Revenue']:,.0f} SAR"
-                    for d, r in _dow_grp.iterrows()
-                )
-
-            # Monthly trend (last 6 months)
-            _monthly_trend = ""
-            if "Date" in o_cur.columns:
-                _mo = o_cur.copy()
-                _mo["Month"] = pd.to_datetime(_mo["Date"]).dt.strftime("%b %Y")
-                _mo["_sort"] = pd.to_datetime(_mo["Date"]).dt.to_period("M")
-                _mo_grp = (_mo.groupby(["Month","_sort"])
-                           .agg(Orders=("Order ID","count"), Revenue=("Sales","sum"))
-                           .reset_index().sort_values("_sort").tail(6))
-                _monthly_trend = "\n".join(
-                    f"  {r['Month']}: {int(r['Orders']):,} orders | {r['Revenue']:,.0f} SAR"
-                    for _, r in _mo_grp.iterrows()
-                )
-
-            _data_ctx = f"""ALNUMUW DASHBOARD — LIVE DATA SNAPSHOT
-Active filter slice only. All figures are pre-computed.
-
-DIMENSION DEFINITIONS (NEVER confuse these):
-  BRAND      = restaurant concept / chain name
-  BRANCH     = physical store / mall location
-  PROVIDER   = food delivery aggregator platform
-  TECHNOLOGY = POS / integration system
-
-━━ OVERALL KPIs ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Orders         : {_ai_orders:,}
-Revenue        : {_ai_revenue:,.0f} SAR
-AOV            : {_ai_aov:,.0f} SAR
-Discount       : {_ai_discount:,.0f} SAR
-Completed      : {_ai_completed:,}
-Cancelled      : {_ai_cancelled:,}
-In Progress    : {_ai_in_prog:,}
-Fill Rate      : {_ai_fill_rate:.1f}%
-Cancel Rate    : {_ai_cancel_rate:.1f}%
-Item Units     : {_ai_item_units:,}
-Items Revenue  : {_ai_item_rev:,.0f} SAR
-Revenue Concentration (top 3 brands): {_top3_pct:.1f}% of total
-
-━━ BENCHMARKS (averages across all active dimension members) ━━
-Avg Brand Cancel Rate : {_avg_brand_cr:.1f}%
-Avg Brand Fill Rate   : {_avg_brand_fill:.1f}%
-Avg Brand AOV         : {_avg_brand_aov:,.0f} SAR
-Avg Branch Cancel Rate: {_avg_loc_cr:.1f}%
-Avg Branch Fill Rate  : {_avg_loc_fill:.1f}%
-
-━━ BEST / WORST PERFORMERS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-BRANDS
-  Highest Revenue : {_brand_best_rev}
-  Lowest Revenue  : {_brand_worst_rev}
-  Best Fill Rate  : {_brand_best_fill}
-  Worst Fill Rate : {_brand_worst_fill}
-  Lowest Cancel   : {_brand_best_cr}
-  Highest Cancel  : {_brand_worst_cr}
-  Highest AOV     : {_brand_best_aov}
-  Lowest AOV      : {_brand_worst_aov}
-BRANCHES
-  Highest Revenue : {_loc_best_rev}
-  Lowest Revenue  : {_loc_worst_rev}
-  Best Fill Rate  : {_loc_best_fill}
-  Worst Fill Rate : {_loc_worst_fill}
-  Lowest Cancel   : {_loc_best_cr}
-  Highest Cancel  : {_loc_worst_cr}
-PROVIDERS
-  Highest Revenue : {_prov_best_rev}
-  Lowest Revenue  : {_prov_worst_rev}
-  Lowest Cancel   : {_prov_best_cr}
-  Highest Cancel  : {_prov_worst_cr}
-
-━━ RISK FLAGS — above-average cancellation rate ━━━━━━━━━
-BRANDS ABOVE AVERAGE ({_avg_brand_cr:.1f}%):
-{chr(10).join(f"  ⚠ {n}: {v:.1f}%" for n, v in _risky_brands.items()) or "  None — all brands within normal range"}
-BRANCHES ABOVE AVERAGE ({_avg_loc_cr:.1f}%):
-{chr(10).join(f"  ⚠ {n}: {v:.1f}%" for n, v in _risky_locs.items()) or "  None — all branches within normal range"}
-
-━━ BY BRAND (full breakdown) ━━━━━━━━━━━━━━━━━━━━━━━━━━━
-{_tbl_to_text(_brand_tbl)}
-
-━━ BY BRANCH / LOCATION (full breakdown) ━━━━━━━━━━━━━━━
-{_tbl_to_text(_loc_tbl)}
-
-━━ BY DELIVERY PROVIDER ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-{_tbl_to_text(_prov_tbl)}
-
-━━ BY TECHNOLOGY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-{_tbl_to_text(_tech_tbl)}
-
-━━ TOP 10 MENU ITEMS BY REVENUE ━━━━━━━━━━━━━━━━━━━━━━━━
-{chr(10).join(f"  {n}: {v:,.0f} SAR" for n, v in _ai_top_items.items()) or "  No data"}
-
-━━ TOP 10 MENU ITEMS BY QUANTITY ━━━━━━━━━━━━━━━━━━━━━━━
-{chr(10).join(f"  {n}: {int(v):,} units" for n, v in _ai_top_items_qty.items()) or "  No data"}
-
-━━ DAY-OF-WEEK PATTERNS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-{_dow_dist or "  No date data available"}
-
-━━ MONTHLY TREND (last 6 months) ━━━━━━━━━━━━━━━━━━━━━━━
-{_monthly_trend or "  No date data available"}
-"""
-
-            _system_instruction = """You are a senior business intelligence consultant and strategic advisor for Alnumuw, a Saudi multi-brand restaurant group. You have deep expertise in F&B operations, delivery platforms, and restaurant performance analytics.
-
-CRITICAL DIMENSION RULES — NEVER break these:
-• BRAND = restaurant concept/chain. Use "BY BRAND" section for brand questions.
-• BRANCH = physical store/location. Use "BY BRANCH" section for location questions.
-• PROVIDER = delivery aggregator. Use "BY DELIVERY PROVIDER" section for platform questions.
-• TECHNOLOGY = POS system. Use "BY TECHNOLOGY" section for tech questions.
-Never mix or confuse these dimensions in your answers.
-
-YOUR ANALYTICAL FRAMEWORK — apply to every response:
-1. DIAGNOSE: What does the data actually show? State the key finding clearly with exact numbers.
-2. BENCHMARK: Compare against the group average. Is this above or below average?
-3. PATTERN: What pattern or trend does this reveal? (concentration, outliers, seasonality)
-4. RISK: What risks does this expose? (high cancel rates, low fill rates, revenue concentration)
-5. OPPORTUNITY: Where is there untapped potential? (underperforming brands, strong DOW peaks)
-6. RECOMMEND: Give 2-3 specific, actionable recommendations the owner can act on immediately.
-
-RESPONSE FORMAT:
-- Always open with a **bold executive summary** (1-2 sentences with the main finding)
-- Use markdown tables when comparing 3+ items side-by-side
-- Use bullet points for recommendations, prefixed with 🔴 (urgent), 🟡 (medium), 🟢 (opportunity)
-- End analytical responses with a "**💡 Bottom Line:**" section
-- Keep total response under 400 words unless the user asks for a detailed report
-
-METRIC DEFINITIONS (use these consistently):
-- Fill Rate = Completed ÷ (Completed + Cancelled) × 100
-- Cancel Rate = Cancelled ÷ Total Orders × 100
-- AOV = Revenue ÷ Total Orders
-- Revenue Concentration = share of top N entities vs total
-
-PROACTIVE BEHAVIOUR:
-- When answering a specific question, also flag 1 related insight the user didn't ask about
-- If you spot a risk in the data (e.g. one branch has 3× average cancel rate), mention it briefly
-- Suggest a follow-up question the user might want to explore next
-
-""" + _data_ctx
-
-            # Build message list for Groq (OpenAI-compatible format)
-            _groq_messages = [{"role": "system", "content": _system_instruction}]
-            for _m in st.session_state.chat_history[:-1]:   # exclude current user msg
-                _groq_messages.append({
-                    "role": _m["role"],   # "user" or "assistant"
-                    "content": _m["content"],
-                })
-            _groq_messages.append({"role": "user", "content": _user_input})
-
-            # ── Call Groq ─────────────────────────────────────────────────────
+            # ── Assistant turn: the tool-calling loop ─────────────────────────
             with st.chat_message("assistant"):
-                with st.spinner("Analysing your data …"):
-                    try:
-                        from groq import Groq as _Groq
-                        _client = _Groq(api_key=ai_key)
-                        _resp   = _client.chat.completions.create(
-                            model="llama-3.3-70b-versatile",
-                            messages=_groq_messages,
-                            temperature=0.2,
-                            max_tokens=1500,
-                        )
-                        _answer = _resp.choices[0].message.content
-                    except Exception as _err:
-                        _answer = (
-                            f"⚠️ **AI error:**\n\n"
-                            f"```\n{_err}\n```\n\n"
-                            "Please check that your Groq API key is valid. "
-                            "Get a free key at [console.groq.com](https://console.groq.com)."
-                        )
-                st.markdown(_answer)
+                _final_text = None
+                _exec_records = []     # [{explanation, code, result, error}]
+                try:
+                    from groq import Groq as _Groq
+                    _client = _Groq(api_key=ai_key)
 
-            st.session_state.chat_history.append({"role": "assistant", "content": _answer})
+                    # Messages: system + prior text turns + the new question.
+                    _messages = [{"role": "system", "content": _build_system_prompt()}]
+                    for _m in st.session_state.chat_history[:-1]:
+                        if _m.get("role") in ("user", "assistant") and _m.get("content"):
+                            _messages.append({"role": _m["role"], "content": _m["content"]})
+                    _messages.append({"role": "user", "content": _user_input})
 
-        # ── Clear conversation button ─────────────────────────────────────────
+                    # Up to 3 rounds: generate code -> execute -> explain, with
+                    # self-correction if the generated code raises an error.
+                    for _round in range(3):
+                        with st.spinner("Analysing your data …"):
+                            _resp = _client.chat.completions.create(
+                                model="llama-3.3-70b-versatile",
+                                messages=_messages,
+                                tools=_AI_TOOLS,
+                                tool_choice="auto",
+                                temperature=0.0,        # deterministic code + answers
+                                max_tokens=1500,
+                            )
+                        _rmsg = _resp.choices[0].message
+                        _calls = _rmsg.tool_calls or []
+                        if not _calls:
+                            _final_text = _rmsg.content or ""
+                            break
+                        # Echo the assistant's tool-call turn back into the thread.
+                        _messages.append({
+                            "role": "assistant",
+                            "content": _rmsg.content or "",
+                            "tool_calls": [
+                                {"id": _tc.id, "type": "function",
+                                 "function": {"name": _tc.function.name,
+                                              "arguments": _tc.function.arguments}}
+                                for _tc in _calls
+                            ],
+                        })
+                        # ---- LOCAL CODE EXECUTION happens here ----------------
+                        for _tc in _calls:
+                            try:
+                                _args = json.loads(_tc.function.arguments or "{}")
+                            except Exception:
+                                _args = {}
+                            _expl = (_args.get("explanation") or "").strip()
+                            _code = _args.get("code") or ""
+                            if _expl:
+                                st.markdown(f"_{_expl}_")
+                            try:
+                                _res = _run_ai_code(_code)
+                                _payload = _serialize_for_model(_res)
+                                _exec_records.append({"explanation": _expl, "code": _code,
+                                                      "result": _res, "error": None})
+                            except Exception as _ce:
+                                _res = None
+                                _payload = f"ERROR running code: {_ce}"
+                                _exec_records.append({"explanation": _expl, "code": _code,
+                                                      "result": None, "error": str(_ce)})
+                            _messages.append({
+                                "role": "tool", "tool_call_id": _tc.id,
+                                "name": "run_pandas", "content": _payload,
+                            })
+                    if _final_text is None:
+                        _final_text = ("I ran the calculation but couldn't finalise a written "
+                                       "summary — here is the computed result below.")
+                except Exception as _err:
+                    _final_text = (f"⚠️ **AI error:**\n\n```\n{_err}\n```\n\n"
+                                   "Check that your Groq API key is valid "
+                                   "([console.groq.com](https://console.groq.com)).")
+
+                # ---- (5) UI RENDER: answer + computed data + transparency -----
+                st.markdown(_final_text)
+                _last = next((r for r in reversed(_exec_records) if r["result"] is not None), None)
+                if _last is not None:
+                    _render_result(_last["result"])
+                    with st.expander("🔍 Show the calculation"):
+                        st.code(_last["code"], language="python")
+
+            # Persist the assistant turn (text + last computed result for replay).
+            st.session_state.chat_history.append({
+                "role": "assistant",
+                "content": _final_text,
+                "result": (_last["result"] if _last is not None else None),
+                "code":   (_last["code"]   if _last is not None else None),
+            })
+
+        # ── Clear conversation ─────────────────────────────────────────────────
         if st.session_state.get("chat_history"):
             st.markdown("---")
             if st.button("🗑️ Clear conversation", key="clear_ai_chat"):
                 st.session_state.chat_history = []
+                st.session_state.pop("ai_call_times", None)
                 st.rerun()
