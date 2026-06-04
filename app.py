@@ -24,7 +24,7 @@ def _check_password():
     pw = st.text_input("Password", type="password", key="_pw_input")
     col1, _ = st.columns([1, 5])
     with col1:
-        login_clicked = st.button("Log in", type="primary")
+        login_clicked = st.button("Log in", type="primary", key="login_btn")
     if login_clicked:
         # st.secrets throws StreamlitSecretNotFoundError when no secrets file
         # exists at all, so we guard with try/except rather than relying on .get().
@@ -178,7 +178,7 @@ st.title("📊 Alnumuw Platform for Commercial Services — Operational Dashboar
 # widgets so they appear at the top of the panel)
 with st.sidebar:
     st.markdown("### 🗂️ Data source")
-    if st.button("🔄 Refresh data from Drive", use_container_width=True):
+    if st.button("🔄 Refresh data from Drive", use_container_width=True, key="refresh_data_btn"):
         _load_from_drive.clear()
         st.rerun()
     with st.expander("⚙️ Upload custom file (override)"):
@@ -189,7 +189,7 @@ with st.sidebar:
             help="Optional: overrides the Drive auto-load for this session. Useful for testing new data without re-uploading to Drive."
         )
     st.markdown("---")
-    if st.button("🚪 Log out", use_container_width=True):
+    if st.button("🚪 Log out", use_container_width=True, key="logout_btn"):
         st.session_state["password_correct"] = False
         st.rerun()
     st.markdown("---")
@@ -323,6 +323,7 @@ with _c3:
         use_container_width=True,
         help="Reset the date range to the full data window",
         on_click=_cb_reset_date,
+        key="reset_date_btn",
     )
 
 if compare_on:
@@ -389,6 +390,7 @@ with st.sidebar:
         use_container_width=True,
         help="Clear every filter selection (date range is untouched)",
         on_click=_cb_clear_filters,
+        key="clear_filters_btn",
     )
 
     # Each filter is wrapped in an expander so the sidebar stays compact when
@@ -567,13 +569,27 @@ if status_user_filtered:
 # ══════════════════════════════════════════════════════════════════════════════
 # DIMENSION COMPARISON BUILDER
 # Builds Sales, Orders, AOV — with growth columns when comparison is on.
-def build_dim_comparison(cur_df, old_df, dim_col, with_compare):
+def build_dim_comparison(cur_df, old_df, dim_col, with_compare, scaffold=None):
+    """
+    scaffold : optional collection of dimension values that should ALWAYS appear
+               in the result even when they have zero orders in cur_df.
+               Used to show "inactive this period but historically active" rows.
+    """
     cur = cur_df.groupby(dim_col).agg(
         Sales  =('Sales',    'sum'),
         Orders =('Order ID', 'count'),
     ).reset_index()
     cur.columns = [dim_col, 'Sales', 'Orders']
-    # Use .where() instead of replace(0, pd.NA) to avoid object-dtype issues
+
+    # Expand to scaffold so historically-active-but-zero-this-period rows appear.
+    if scaffold is not None:
+        _sc = pd.DataFrame({dim_col: sorted(scaffold)})
+        cur = _sc.merge(cur, on=dim_col, how='left')
+        cur['Sales']  = cur['Sales'].fillna(0)
+        cur['Orders'] = cur['Orders'].fillna(0).astype(int)
+
+    # Use .where() instead of replace(0, pd.NA) to avoid object-dtype issues.
+    # Zero-order rows get NaN AOV (renders as —).
     cur['AOV'] = (cur['Sales'].astype(float) /
                   cur['Orders'].astype(float).where(cur['Orders'] > 0)).round(0)
     if not with_compare or old_df.empty:
@@ -583,9 +599,11 @@ def build_dim_comparison(cur_df, old_df, dim_col, with_compare):
         Orders =('Order ID', 'count'),
     ).reset_index()
     old.columns = [dim_col, '_PrevSales', '_PrevOrders']
-    df = cur.merge(old, on=dim_col, how='outer')
-    # Force all numeric columns to float after outer merge —
-    # object dtype can sneak in when NaN rows get introduced by the merge.
+    # Use left merge when scaffold already guarantees all rows; outer otherwise
+    # (catches entries that only appear in old_df with no current-period match).
+    _merge = 'left' if scaffold is not None else 'outer'
+    df = cur.merge(old, on=dim_col, how=_merge)
+    # Force all numeric columns to float after merge.
     for col in ['Sales', 'Orders', '_PrevSales', '_PrevOrders']:
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
     df['AOV'] = (df['Sales'] / df['Orders'].where(df['Orders'] > 0)).round(0)
@@ -597,8 +615,6 @@ def build_dim_comparison(cur_df, old_df, dim_col, with_compare):
                                df['_PrevOrders'].where(df['_PrevOrders'] > 0)) * 100
     df['AOV vs Prev %']    = ((df['AOV']    - prev_aov) /
                                prev_aov.where(prev_aov > 0)) * 100
-    # _PrevSales, _PrevOrders, _PrevAOV are kept so callers can pass them as
-    # prev_map to render_comparison_table and show "was X" in each growth cell.
     return df.sort_values('Sales', ascending=False).reset_index(drop=True)
 
 # Urban Piper-style comparison table renderer.
@@ -859,6 +875,26 @@ def render_dim_tab(df_raw, dim_label, compare_on, tab_key, extra_charts_fn=None)
         )
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# HISTORICAL SCAFFOLD — computed ONCE, reused by Brands / Aggregators /
+# Technologies / Summary snapshot tables.
+# Filters df_all_o by the current brand/provider/technology/location/items
+# filters but WITHOUT a date constraint, giving the "ever active under current
+# filters" set for each dimension.
+# ══════════════════════════════════════════════════════════════════════════════
+_hist_o = df_all_o[
+    df_all_o['Brand'].isin(active_brands) &
+    df_all_o['Provider'].isin(active_provs) &
+    df_all_o['Technology'].isin(active_techs) &
+    df_all_o['Location'].isin(active_locs)
+]
+_hist_item_ids = master_map[master_map['Items'].isin(active_items)]['Order ID'].unique()
+_hist_o = _hist_o[_hist_o['Order ID'].isin(_hist_item_ids)]
+
+_sc_brand    = set(_hist_o['Brand'].dropna().unique())
+_sc_provider = set(_hist_o['Provider'].dropna().unique())
+_sc_tech     = set(_hist_o['Technology'].dropna().unique())
+
 # TABS
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("<br>", unsafe_allow_html=True)
@@ -936,12 +972,28 @@ with tab_summary:
         st.markdown("---")
         st.markdown("### 📋 Performance Snapshot by Dimension")
 
+        # Scaffold map for the Summary snapshot tables — same historical sets
+        # computed before the tabs section.
+        _snap_scaffolds = {
+            'Brand':      _sc_brand,
+            'Location':   set(_hist_o['Location'].dropna().unique()),
+            'Provider':   _sc_provider,
+            'Technology': _sc_tech,
+        }
+
         def _build_snapshot(cur_df, old_df, dim_col):
-            """Revenue / Orders / AOV per dimension; adds % vs prev when comparison is on."""
+            """Revenue / Orders / AOV per dimension; adds % vs prev when comparison is on.
+            Uses _snap_scaffolds so zero-this-period but historically active rows appear."""
+            sc = _snap_scaffolds.get(dim_col)
             cur = cur_df.groupby(dim_col).agg(
                 Revenue=('Sales',    'sum'),
                 Orders =('Order ID', 'count'),
             ).reset_index()
+            if sc is not None:
+                _sc_df = pd.DataFrame({dim_col: sorted(sc)})
+                cur = _sc_df.merge(cur, on=dim_col, how='left')
+                cur['Revenue'] = cur['Revenue'].fillna(0)
+                cur['Orders']  = cur['Orders'].fillna(0).astype(int)
             cur['AOV'] = (cur['Revenue'] / cur['Orders'].where(cur['Orders'] > 0)).round(0)
             if not compare_on or old_df.empty:
                 return cur.sort_values('Revenue', ascending=False).reset_index(drop=True)
@@ -949,7 +1001,8 @@ with tab_summary:
                 _PrevRevenue=('Sales',    'sum'),
                 _PrevOrders =('Order ID', 'count'),
             ).reset_index()
-            df = cur.merge(old, on=dim_col, how='outer')
+            _merge = 'left' if sc is not None else 'outer'
+            df = cur.merge(old, on=dim_col, how=_merge)
             for c in ['Revenue', 'Orders', '_PrevRevenue', '_PrevOrders']:
                 df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
             df['AOV'] = (df['Revenue'] / df['Orders'].where(df['Orders'] > 0)).round(0)
@@ -1953,7 +2006,7 @@ with tab_branches:
 # ── Aggregators tab
 with tab_aggs:
     st.markdown("### 🚚 Aggregator Performance")
-    df_agg = build_dim_comparison(o_cur, o_old, 'Provider', compare_on)
+    df_agg = build_dim_comparison(o_cur, o_old, 'Provider', compare_on, scaffold=_sc_provider)
     df_agg = df_agg.rename(columns={'Provider': 'Aggregator'})
     # ── % contribution to total sales ──────────────────────────────────────
     _agg_total = df_agg['Sales'].sum()
@@ -2011,7 +2064,7 @@ with tab_aggs:
 # ── Brands tab
 with tab_brands:
     st.markdown("### 🏷️ Brand Performance")
-    df_brand = build_dim_comparison(o_cur, o_old, 'Brand', compare_on)
+    df_brand = build_dim_comparison(o_cur, o_old, 'Brand', compare_on, scaffold=_sc_brand)
     # ── % contribution to total sales ──────────────────────────────────────
     _brand_total = df_brand['Sales'].sum()
     df_brand.insert(
@@ -2067,7 +2120,7 @@ with tab_brands:
 # ── Technologies tab
 with tab_tech:
     st.markdown("### ⚙️ Technology / Channel Performance")
-    df_tech = build_dim_comparison(o_cur, o_old, 'Technology', compare_on)
+    df_tech = build_dim_comparison(o_cur, o_old, 'Technology', compare_on, scaffold=_sc_tech)
     # ── Per-technology Completed / Cancelled (from status-unfiltered slice) ─
     _tc_comp = (o_cur_fr[o_cur_fr['Status'] == 'Completed']
                 .groupby('Technology').size().rename('Completed'))
@@ -2809,16 +2862,16 @@ with tab_branch_drill:
         _db_comp = (_db_fr['Status'] == 'Completed').sum()
         _db_inp  = _db_fr['Status'].isin(IN_PROGRESS_STATUSES).sum()
         _db_rej  = _db_fr['Status'].isin(REJECTED_STATUSES).sum()
-        _db_fr_d = (_db_comp + _db_rej) or 1
-        _db_fill = _db_comp / _db_fr_d * 100
+        _db_fr_sum = _db_comp + _db_rej
+        _db_fill   = (_db_comp / _db_fr_sum * 100) if _db_fr_sum > 0 else 0.0
         _db_aov  = _db_rev / _db_ords if _db_ords > 0 else 0.0
 
         _db_rev_old  = _db_old['Sales'].sum()
         _db_ords_old = len(_db_old)
         _db_comp_old = (_db_old_fr['Status'] == 'Completed').sum() if not _db_old_fr.empty else 0
         _db_rej_old  = _db_old_fr['Status'].isin(REJECTED_STATUSES).sum() if not _db_old_fr.empty else 0
-        _db_fr_d_old = (_db_comp_old + _db_rej_old) or 1
-        _db_fill_old = _db_comp_old / _db_fr_d_old * 100
+        _db_fr_sum_old = _db_comp_old + _db_rej_old
+        _db_fill_old   = (_db_comp_old / _db_fr_sum_old * 100) if _db_fr_sum_old > 0 else 0.0
 
         kd = st.columns(5)
         if compare_on:
