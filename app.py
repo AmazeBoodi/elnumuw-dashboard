@@ -1702,10 +1702,12 @@ with tab_items:
 with tab_branches:
     st.markdown("### 📍 Sales by Branch")
     if not o_cur.empty:
-        # ── Scaffold: ALL known branches (respects Location sidebar filter).
-        # Left-joining onto this means zero-order branches show as 0 rather
-        # than being silently dropped from the table.
-        _br_scaffold = pd.DataFrame({'Branch': sorted(active_locs)})
+        # ── Scaffold: branches that have AT LEAST ONE historical order in the
+        # full dataset, intersected with the active Location sidebar filter.
+        # This shows zero-order-this-period branches while excluding locations
+        # that never traded at all (ghost entries with no data).
+        _hist_branches = set(df_all_o['Location'].dropna().unique())
+        _br_scaffold = pd.DataFrame({'Branch': sorted(_hist_branches & set(active_locs))})
 
         # Current period: sales + total orders — left-join preserves zero rows.
         _cur_agg = (o_cur.groupby('Location')
