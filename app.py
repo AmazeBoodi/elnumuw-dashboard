@@ -327,14 +327,44 @@ with _c3:
 
 if compare_on:
     n_days = (pd.Timestamp(ed) - pd.Timestamp(sd)).days + 1
-    cmp_e  = pd.Timestamp(sd) - pd.Timedelta(days=1)
-    cmp_s  = max(cmp_e - pd.Timedelta(days=n_days - 1), pd.Timestamp(G_MIN))
-    
-    _cc1, _cc2 = st.columns([2, 2])
-    with _cc1:
-        cr = st.date_input("Compare to historical period", [cmp_s.date(), cmp_e.date()], min_value=G_MIN, max_value=G_MAX)
-        if len(cr) == 2:
-            cmp_s, cmp_e = pd.Timestamp(cr[0]), pd.Timestamp(cr[1])
+    # The natural comparison window ends the day before the current period starts.
+    _cmp_e_natural = pd.Timestamp(sd) - pd.Timedelta(days=1)
+
+    if _cmp_e_natural < pd.Timestamp(G_MIN):
+        # Current period starts at (or before) the very first date in the dataset
+        # — there is no historical data to compare against.
+        st.markdown(
+            "<div style='"
+            "padding:10px 16px;border-radius:8px;border-left:4px solid #F59E0B;"
+            "background:rgba(245,158,11,0.08);font-size:0.875rem;line-height:1.5"
+            "'>"
+            "📅 <b>No comparison period available.</b> "
+            "Your current start date is at the beginning of the dataset — "
+            "there is no earlier data to compare against. "
+            "Move the <b>start date</b> forward to create room for a historical window."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        compare_on = False          # disable gracefully; prevents downstream errors
+    else:
+        # Clamp both ends to the data bounds so the date picker never receives
+        # a value outside [min_value, max_value] — that causes RangeError in JS.
+        cmp_e = _cmp_e_natural
+        cmp_s = max(cmp_e - pd.Timedelta(days=n_days - 1), pd.Timestamp(G_MIN))
+
+        _cc1, _cc2 = st.columns([2, 2])
+        with _cc1:
+            # max_value is capped at the day before the current period so the
+            # comparison window can never overlap with the current period.
+            _cmp_max = min(cmp_e.date(), G_MAX)
+            cr = st.date_input(
+                "Compare to historical period",
+                [cmp_s.date(), cmp_e.date()],
+                min_value=G_MIN,
+                max_value=_cmp_max,
+            )
+            if len(cr) == 2:
+                cmp_s, cmp_e = pd.Timestamp(cr[0]), pd.Timestamp(cr[1])
 
 st.markdown("---")
 
