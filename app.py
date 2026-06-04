@@ -1702,12 +1702,20 @@ with tab_items:
 with tab_branches:
     st.markdown("### 📍 Sales by Branch")
     if not o_cur.empty:
-        # ── Scaffold: branches that have AT LEAST ONE historical order in the
-        # full dataset, intersected with the active Location sidebar filter.
-        # This shows zero-order-this-period branches while excluding locations
-        # that never traded at all (ghost entries with no data).
-        _hist_branches = set(df_all_o['Location'].dropna().unique())
-        _br_scaffold = pd.DataFrame({'Branch': sorted(_hist_branches & set(active_locs))})
+        # ── Scaffold: branches that have at least one order in the FULL date
+        # range under the current brand/provider/technology/items filters.
+        # This shows zero-order-this-period branches (e.g. a branch that traded
+        # in Jan–Apr but not May) while excluding ghost locations that never
+        # had real orders under the current filter combination.
+        _hist_o = df_all_o[
+            df_all_o['Brand'].isin(active_brands) &
+            df_all_o['Provider'].isin(active_provs) &
+            df_all_o['Technology'].isin(active_techs) &
+            df_all_o['Location'].isin(active_locs)
+        ]
+        _hist_ids = master_map[master_map['Items'].isin(active_items)]['Order ID'].unique()
+        _hist_o = _hist_o[_hist_o['Order ID'].isin(_hist_ids)]
+        _br_scaffold = pd.DataFrame({'Branch': sorted(_hist_o['Location'].dropna().unique())})
 
         # Current period: sales + total orders — left-join preserves zero rows.
         _cur_agg = (o_cur.groupby('Location')
