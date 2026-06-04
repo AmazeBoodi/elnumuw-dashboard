@@ -1702,8 +1702,22 @@ with tab_items:
 with tab_branches:
     st.markdown("### 📍 Sales by Branch")
     if not o_cur.empty:
-        # ── Active branches = distinct locations with at least one order ───────
-        _active_br_cur = o_cur['Location'].nunique()
+        # ── Scaffold: ALL known branches (respects Location sidebar filter).
+        # Left-joining onto this means zero-order branches show as 0 rather
+        # than being silently dropped from the table.
+        _br_scaffold = pd.DataFrame({'Branch': sorted(active_locs)})
+
+        # Current period: sales + total orders — left-join preserves zero rows.
+        _cur_agg = (o_cur.groupby('Location')
+                    .agg(Sales=('Sales','sum'), Orders=('Order ID','count'))
+                    .reset_index()
+                    .rename(columns={'Location':'Branch','Sales':'Current Sales','Orders':'Total Orders'}))
+        cur_b = _br_scaffold.merge(_cur_agg, on='Branch', how='left')
+        cur_b['Current Sales'] = cur_b['Current Sales'].fillna(0)
+        cur_b['Total Orders']  = cur_b['Total Orders'].fillna(0).astype(int)
+
+        # ── Active branches = those with at least one order this period ──────
+        _active_br_cur = int((cur_b['Total Orders'] > 0).sum())
         _bm = st.columns(4)
         if compare_on and not o_old.empty:
             _active_br_old = o_old['Location'].nunique()
@@ -1712,41 +1726,32 @@ with tab_branches:
         else:
             _bm[0].metric("🏢 Active Branches", f"{_active_br_cur:,}")
 
-        # Current period: sales + total orders per branch
-        cur_b = o_cur.groupby('Location').agg(
-            Sales=('Sales','sum'),
-            Orders=('Order ID','count'),
-        ).reset_index()
-        cur_b.columns = ['Branch', 'Current Sales', 'Total Orders']
-
         # Status-unfiltered slice for accurate Completed / In Progress / Rejected / Fill Rate
-        b_total = o_cur_fr.groupby('Location').size().reset_index()
-        b_total.columns = ['Branch', 'TotalFR']
+        b_total = (o_cur_fr.groupby('Location').size().reset_index()
+                   .rename(columns={'Location':'Branch', 0:'TotalFR'}))
         b_rej_g = (o_cur_fr[o_cur_fr['Status'].isin(REJECTED_STATUSES)]
-                   .groupby('Location').size().reset_index())
-        b_rej_g.columns = ['Branch', 'Rejected']
+                   .groupby('Location').size().reset_index()
+                   .rename(columns={'Location':'Branch', 0:'Rejected'}))
         b_inp_g = (o_cur_fr[o_cur_fr['Status'].isin(IN_PROGRESS_STATUSES)]
-                   .groupby('Location').size().reset_index())
-        b_inp_g.columns = ['Branch', 'InProgress']
+                   .groupby('Location').size().reset_index()
+                   .rename(columns={'Location':'Branch', 0:'InProgress'}))
 
         branches = (cur_b
                     .merge(b_total, on='Branch', how='left')
                     .merge(b_rej_g, on='Branch', how='left')
                     .merge(b_inp_g, on='Branch', how='left'))
-        branches['Rejected']    = branches['Rejected'].fillna(0).astype(int)
-        branches['TotalFR']     = branches['TotalFR'].fillna(0).astype(int)
-        branches['InProgress']  = branches['InProgress'].fillna(0).astype(int)
-        # Completed = only orders with a definitive positive outcome.
-        # In Progress is excluded from both Completed and the Fill Rate denominator
-        # so that pending orders do not inflate the fill rate (same logic as KPI tile).
-        branches['Completed']   = (branches['TotalFR'] - branches['Rejected'] - branches['InProgress']).clip(lower=0).astype(int)
-        _br_fr_sum = branches['Completed'] + branches['Rejected']
+        branches['Rejected']   = branches['Rejected'].fillna(0).astype(int)
+        branches['TotalFR']    = branches['TotalFR'].fillna(0).astype(int)
+        branches['InProgress'] = branches['InProgress'].fillna(0).astype(int)
+        branches['Completed']  = (branches['TotalFR'] - branches['Rejected'] - branches['InProgress']).clip(lower=0).astype(int)
+
+        _br_fr_sum   = branches['Completed'] + branches['Rejected']
         _br_fr_denom = _br_fr_sum.where(_br_fr_sum > 0)
-        branches['Fill Rate %'] = (branches['Completed'] / _br_fr_denom * 100).fillna(100)
-        # Fail Rate = cancelled ÷ resolved (Completed + Rejected) — the complement of
-        # Fill Rate, matching the Summary "Fail Rate" definition (In Progress excluded).
-        branches['Fail Rate %'] = (branches['Rejected'] / _br_fr_denom * 100).fillna(0)
-        branches['AOV']         = branches['Current Sales'] / branches['Total Orders'].where(branches['Total Orders'] > 0)
+        # Zero-order branches get NaN (displayed as —) for rate/AOV columns
+        # rather than misleading 100% / 0% defaults.
+        branches['Fill Rate %'] = (branches['Completed'] / _br_fr_denom * 100).where(branches['Total Orders'] > 0)
+        branches['Fail Rate %'] = (branches['Rejected']  / _br_fr_denom * 100).where(branches['Total Orders'] > 0)
+        branches['AOV']         = (branches['Current Sales'] / branches['Total Orders'].where(branches['Total Orders'] > 0)).where(branches['Total Orders'] > 0)
 
         if compare_on and not o_old.empty:
             # Aggregate all previous-period metrics per branch
@@ -1833,6 +1838,7 @@ with tab_branches:
                 key="exp_branches",
             )
         branches = branches.sort_values(_b_sort, ascending=_b_dir.startswith('↑')).reset_index(drop=True)
+        branches.insert(0, '#', range(1, len(branches) + 1))
 
         # Top-10 / Bottom-10 highlight (applied to the Sales-rank position)
         # Re-rank by Sales to get correct highlight positions regardless of sort
@@ -1865,6 +1871,7 @@ with tab_branches:
                     'AOV':           'AOV vs Prev %',
                 },
                 value_format={
+                    '#':             '{:,}',
                     'Current Sales': '{:,.0f}',
                     'Total Orders':  '{:,}',
                     'Completed':     '{:,}',
@@ -1874,6 +1881,7 @@ with tab_branches:
                     'AOV':           '{:,.0f}',
                 },
                 col_labels={
+                    '#':                    '#',
                     'Current Sales':        'Sales (SAR)',
                     'Total Orders':         'Orders',
                     'Fill Rate %':          'Fill Rate',
@@ -1917,6 +1925,7 @@ with tab_branches:
                       .format(fmt_apply, na_rep='—'))
             st.dataframe(styled, use_container_width=True, hide_index=True,
                          column_config={
+                             "#":             st.column_config.NumberColumn("#", width="small"),
                              "Branch":        st.column_config.TextColumn("Branch"),
                              "Current Sales": st.column_config.TextColumn("Sales (SAR)"),
                              "Total Orders":  st.column_config.TextColumn("Orders"),
