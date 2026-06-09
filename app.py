@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import html as _html   # used to escape data-derived strings before injecting into HTML tables
 
 # We let Streamlit manage the background theme naturally based on device preferences
 st.set_page_config(page_title="Alnumuw Dashboard", page_icon="📊", layout="wide")
@@ -24,20 +23,12 @@ def _check_password():
     pw = st.text_input("Password", type="password", key="_pw_input")
     col1, _ = st.columns([1, 5])
     with col1:
-        login_clicked = st.button("Log in", type="primary", key="login_btn")
+        login_clicked = st.button("Log in", type="primary")
     if login_clicked:
-        # st.secrets throws StreamlitSecretNotFoundError when no secrets file
-        # exists at all, so we guard with try/except rather than relying on .get().
-        try:
-            expected = st.secrets.get("APP_PASSWORD", None)
-        except Exception:
-            expected = None
-        if not expected:
-            st.error(
-                "⚠️ APP_PASSWORD is not configured.  \n"
-                "Create `.streamlit/secrets.toml` in the project folder and add:  \n"
-                "`APP_PASSWORD = \"your-password\"`"
-            )
+        expected = st.secrets.get("APP_PASSWORD", None)
+        if expected is None:
+            st.error("⚠️ APP_PASSWORD is not configured in Streamlit secrets. "
+                     "Add it under App settings → Secrets.")
             return False
         if pw == expected:
             st.session_state["password_correct"] = True
@@ -178,7 +169,7 @@ st.title("📊 Alnumuw Platform for Commercial Services — Operational Dashboar
 # widgets so they appear at the top of the panel)
 with st.sidebar:
     st.markdown("### 🗂️ Data source")
-    if st.button("🔄 Refresh data from Drive", use_container_width=True, key="refresh_data_btn"):
+    if st.button("🔄 Refresh data from Drive", use_container_width=True):
         _load_from_drive.clear()
         st.rerun()
     with st.expander("⚙️ Upload custom file (override)"):
@@ -189,7 +180,7 @@ with st.sidebar:
             help="Optional: overrides the Drive auto-load for this session. Useful for testing new data without re-uploading to Drive."
         )
     st.markdown("---")
-    if st.button("🚪 Log out", use_container_width=True, key="logout_btn"):
+    if st.button("🚪 Log out", use_container_width=True):
         st.session_state["password_correct"] = False
         st.rerun()
     st.markdown("---")
@@ -199,10 +190,7 @@ try:
         st.caption("📎 Using manually-uploaded file (override active).")
         file_bytes = uploaded.read()
     else:
-        try:
-            drive_file_id = st.secrets.get("DRIVE_FILE_ID", None)
-        except Exception:
-            drive_file_id = None
+        drive_file_id = st.secrets.get("DRIVE_FILE_ID", None)
         if not drive_file_id:
             st.error(
                 "⚠️ DRIVE_FILE_ID is not configured in Streamlit secrets. "
@@ -323,49 +311,18 @@ with _c3:
         use_container_width=True,
         help="Reset the date range to the full data window",
         on_click=_cb_reset_date,
-        key="reset_date_btn",
     )
 
 if compare_on:
     n_days = (pd.Timestamp(ed) - pd.Timestamp(sd)).days + 1
-    # The natural comparison window ends the day before the current period starts.
-    _cmp_e_natural = pd.Timestamp(sd) - pd.Timedelta(days=1)
-
-    if _cmp_e_natural < pd.Timestamp(G_MIN):
-        # Current period starts at (or before) the very first date in the dataset
-        # — there is no historical data to compare against.
-        st.markdown(
-            "<div style='"
-            "padding:10px 16px;border-radius:8px;border-left:4px solid #F59E0B;"
-            "background:rgba(245,158,11,0.08);font-size:0.875rem;line-height:1.5"
-            "'>"
-            "📅 <b>No comparison period available.</b> "
-            "Your current start date is at the beginning of the dataset — "
-            "there is no earlier data to compare against. "
-            "Move the <b>start date</b> forward to create room for a historical window."
-            "</div>",
-            unsafe_allow_html=True,
-        )
-        compare_on = False          # disable gracefully; prevents downstream errors
-    else:
-        # Clamp both ends to the data bounds so the date picker never receives
-        # a value outside [min_value, max_value] — that causes RangeError in JS.
-        cmp_e = _cmp_e_natural
-        cmp_s = max(cmp_e - pd.Timedelta(days=n_days - 1), pd.Timestamp(G_MIN))
-
-        _cc1, _cc2 = st.columns([2, 2])
-        with _cc1:
-            # max_value is capped at the day before the current period so the
-            # comparison window can never overlap with the current period.
-            _cmp_max = min(cmp_e.date(), G_MAX)
-            cr = st.date_input(
-                "Compare to historical period",
-                [cmp_s.date(), cmp_e.date()],
-                min_value=G_MIN,
-                max_value=_cmp_max,
-            )
-            if len(cr) == 2:
-                cmp_s, cmp_e = pd.Timestamp(cr[0]), pd.Timestamp(cr[1])
+    cmp_e  = pd.Timestamp(sd) - pd.Timedelta(days=1)
+    cmp_s  = max(cmp_e - pd.Timedelta(days=n_days - 1), pd.Timestamp(G_MIN))
+    
+    _cc1, _cc2 = st.columns([2, 2])
+    with _cc1:
+        cr = st.date_input("Compare to historical period", [cmp_s.date(), cmp_e.date()], min_value=G_MIN, max_value=G_MAX)
+        if len(cr) == 2:
+            cmp_s, cmp_e = pd.Timestamp(cr[0]), pd.Timestamp(cr[1])
 
 st.markdown("---")
 
@@ -390,7 +347,6 @@ with st.sidebar:
         use_container_width=True,
         help="Clear every filter selection (date range is untouched)",
         on_click=_cb_clear_filters,
-        key="clear_filters_btn",
     )
 
     # Each filter is wrapped in an expander so the sidebar stays compact when
@@ -522,44 +478,32 @@ inp_cur  = len(o_cur_fr[o_cur_fr['Status'].isin(IN_PROGRESS_STATUSES)])
 rej_cur  = len(o_cur_fr[o_cur_fr['Status'].isin(REJECTED_STATUSES)])
 disc_cur = o_cur['Discount'].sum()
 net_cur  = rev_cur - disc_cur
-aov_cur  = (rev_cur / ord_cur) if ord_cur > 0 else 0.0
-# Cancel Rate = cancelled ÷ (completed + cancelled) — excludes In Progress (same as Fill Rate)
-_cr_denom_cur    = comp_cur + rej_cur
-cancel_rate_cur  = (rej_cur / _cr_denom_cur * 100) if _cr_denom_cur > 0 else 0.0
-
-aov_old         = (rev_old / ord_old) if ord_old > 0 else 0.0
-_cr_denom_old   = comp_old + rej_old
-cancel_rate_old = (rej_old / _cr_denom_old * 100) if _cr_denom_old > 0 else 0.0
 
 def _pct(cur, old):
     return ((cur - old) / old * 100) if old > 0 else 0.0
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SUMMARY KPI TILES (8)
+# SUMMARY KPI TILES (6)
 # ══════════════════════════════════════════════════════════════════════════════
-k_cols = st.columns(8)
+k_cols = st.columns(6)
 fill_label = "🎯 Fill Rate %" + (" *" if status_user_filtered else "")
 
 if compare_on:
-    k_cols[0].metric("💰 Revenue",       f"{rev_cur:,.0f}",       f"{_pct(rev_cur,  rev_old):+.1f}%  ·  was {rev_old:,.0f}")
-    k_cols[1].metric("📦 Total Orders",  f"{ord_cur:,}",           f"{_pct(ord_cur,  ord_old):+.1f}%  ·  was {ord_old:,}")
-    k_cols[2].metric("✅ Completed",     f"{comp_cur:,}",           f"{_pct(comp_cur, comp_old):+.1f}%  ·  was {comp_old:,}")
-    k_cols[3].metric("🔄 In Progress",  f"{inp_cur:,}",            f"{_pct(inp_cur,  inp_old):+.1f}%  ·  was {inp_old:,}")
-    k_cols[4].metric("❌ Canceled",      f"{rej_cur:,}",            f"{_pct(rej_cur,  rej_old):+.1f}%  ·  was {rej_old:,}", delta_color="inverse")
-    k_cols[5].metric("💳 AOV (SAR)",     f"{aov_cur:,.0f}",        f"{_pct(aov_cur, aov_old):+.1f}%  ·  was {aov_old:,.0f}")
-    k_cols[6].metric(fill_label,         f"{fill_cur:.1f}%",        f"{(fill_cur - fill_old):+.1f} pp  ·  was {fill_old:.1f}%")
-    k_cols[7].metric("📉 Fail Rate",     f"{cancel_rate_cur:.1f}%", f"{(cancel_rate_cur - cancel_rate_old):+.1f} pp  ·  was {cancel_rate_old:.1f}%", delta_color="inverse")
-    st.caption(f"Current period: **{net_cur:,.0f} SAR** net revenue · Previous: **{net_old:,.0f} SAR** · Fill Rate & Fail Rate exclude In Progress orders (outcome still unknown)")
+    k_cols[0].metric("💰 Gross Revenue",      f"{rev_cur:,.0f} SAR", f"{_pct(rev_cur,  rev_old):+.1f}%  ·  was {rev_old:,.0f} SAR")
+    k_cols[1].metric("📦 Total Orders",        f"{ord_cur:,}",        f"{_pct(ord_cur,  ord_old):+.1f}%  ·  was {ord_old:,}")
+    k_cols[2].metric("✅ Completed",           f"{comp_cur:,}",       f"{_pct(comp_cur, comp_old):+.1f}%  ·  was {comp_old:,}")
+    k_cols[3].metric("🔄 In Progress",         f"{inp_cur:,}",        f"{_pct(inp_cur,  inp_old):+.1f}%  ·  was {inp_old:,}")
+    k_cols[4].metric("❌ Canceled",            f"{rej_cur:,}",        f"{_pct(rej_cur,  rej_old):+.1f}%  ·  was {rej_old:,}", delta_color="inverse")
+    k_cols[5].metric(fill_label,               f"{fill_cur:.1f}%",    f"{(fill_cur - fill_old):+.1f} pp  ·  was {fill_old:.1f}%")
+    st.caption(f"Current period: **{net_cur:,.0f} SAR** net revenue · Previous: **{net_old:,.0f} SAR** · Fill Rate excludes In Progress orders (outcome still unknown)")
 else:
-    k_cols[0].metric("💰 Revenue",      f"{rev_cur:,.0f}")
-    k_cols[1].metric("📦 Total Orders", f"{ord_cur:,}")
-    k_cols[2].metric("✅ Completed",    f"{comp_cur:,}")
-    k_cols[3].metric("🔄 In Progress", f"{inp_cur:,}")
-    k_cols[4].metric("❌ Canceled",     f"{rej_cur:,}")
-    k_cols[5].metric("💳 AOV (SAR)",    f"{aov_cur:,.0f}")
-    k_cols[6].metric(fill_label,        f"{fill_cur:.1f}%")
-    k_cols[7].metric("📉 Fail Rate",    f"{cancel_rate_cur:.1f}%")
-    st.caption(f"Net revenue this period: **{net_cur:,.0f} SAR** · Fill Rate & Fail Rate exclude In Progress orders (outcome still unknown)")
+    k_cols[0].metric("💰 Gross Revenue", f"{rev_cur:,.0f} SAR")
+    k_cols[1].metric("📦 Total Orders",   f"{ord_cur:,}")
+    k_cols[2].metric("✅ Completed",      f"{comp_cur:,}")
+    k_cols[3].metric("🔄 In Progress",    f"{inp_cur:,}")
+    k_cols[4].metric("❌ Canceled",       f"{rej_cur:,}")
+    k_cols[5].metric(fill_label,          f"{fill_cur:.1f}%")
+    st.caption(f"Net revenue this period: **{net_cur:,.0f} SAR** · Fill Rate excludes In Progress orders (outcome still unknown)")
 
 if status_user_filtered:
     st.caption("* Fill Rate is always calculated using all order statuses — even if you have filtered by status in the sidebar. This is intentional: if we only counted 'Completed' orders, Fill Rate would always show 100%, which would be meaningless.")
@@ -569,27 +513,13 @@ if status_user_filtered:
 # ══════════════════════════════════════════════════════════════════════════════
 # DIMENSION COMPARISON BUILDER
 # Builds Sales, Orders, AOV — with growth columns when comparison is on.
-def build_dim_comparison(cur_df, old_df, dim_col, with_compare, scaffold=None):
-    """
-    scaffold : optional collection of dimension values that should ALWAYS appear
-               in the result even when they have zero orders in cur_df.
-               Used to show "inactive this period but historically active" rows.
-    """
+def build_dim_comparison(cur_df, old_df, dim_col, with_compare):
     cur = cur_df.groupby(dim_col).agg(
         Sales  =('Sales',    'sum'),
         Orders =('Order ID', 'count'),
     ).reset_index()
     cur.columns = [dim_col, 'Sales', 'Orders']
-
-    # Expand to scaffold so historically-active-but-zero-this-period rows appear.
-    if scaffold is not None:
-        _sc = pd.DataFrame({dim_col: sorted(scaffold)})
-        cur = _sc.merge(cur, on=dim_col, how='left')
-        cur['Sales']  = cur['Sales'].fillna(0)
-        cur['Orders'] = cur['Orders'].fillna(0).astype(int)
-
-    # Use .where() instead of replace(0, pd.NA) to avoid object-dtype issues.
-    # Zero-order rows get NaN AOV (renders as —).
+    # Use .where() instead of replace(0, pd.NA) to avoid object-dtype issues
     cur['AOV'] = (cur['Sales'].astype(float) /
                   cur['Orders'].astype(float).where(cur['Orders'] > 0)).round(0)
     if not with_compare or old_df.empty:
@@ -599,11 +529,9 @@ def build_dim_comparison(cur_df, old_df, dim_col, with_compare, scaffold=None):
         Orders =('Order ID', 'count'),
     ).reset_index()
     old.columns = [dim_col, '_PrevSales', '_PrevOrders']
-    # Use left merge when scaffold already guarantees all rows; outer otherwise
-    # (catches entries that only appear in old_df with no current-period match).
-    _merge = 'left' if scaffold is not None else 'outer'
-    df = cur.merge(old, on=dim_col, how=_merge)
-    # Force all numeric columns to float after merge.
+    df = cur.merge(old, on=dim_col, how='outer')
+    # Force all numeric columns to float after outer merge —
+    # object dtype can sneak in when NaN rows get introduced by the merge.
     for col in ['Sales', 'Orders', '_PrevSales', '_PrevOrders']:
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
     df['AOV'] = (df['Sales'] / df['Orders'].where(df['Orders'] > 0)).round(0)
@@ -615,6 +543,8 @@ def build_dim_comparison(cur_df, old_df, dim_col, with_compare, scaffold=None):
                                df['_PrevOrders'].where(df['_PrevOrders'] > 0)) * 100
     df['AOV vs Prev %']    = ((df['AOV']    - prev_aov) /
                                prev_aov.where(prev_aov > 0)) * 100
+    # _PrevSales, _PrevOrders, _PrevAOV are kept so callers can pass them as
+    # prev_map to render_comparison_table and show "was X" in each growth cell.
     return df.sort_values('Sales', ascending=False).reset_index(drop=True)
 
 # Urban Piper-style comparison table renderer.
@@ -687,7 +617,7 @@ def render_comparison_table(df, growth_map, value_format=None, col_labels=None,
         'font-size:0.8rem;position:sticky;top:0;z-index:2;'
     )
     header = ''.join(
-        f'<th style="{_th_style}">{_html.escape(str(labels.get(c, c)))}</th>'
+        f'<th style="{_th_style}">{labels.get(c, c)}</th>'
         for c in display_cols
     )
 
@@ -721,9 +651,7 @@ def render_comparison_table(df, growth_map, value_format=None, col_labels=None,
             cells.append(
                 f'<td style="padding:8px 14px;white-space:nowrap;'
                 f'border-bottom:1px solid rgba(128,128,128,0.1)">'
-                # v_str is data-derived (brand/branch/item names) → escape it.
-                # span is our own trusted HTML (coloured arrows) → must NOT be escaped.
-                f'{_html.escape(v_str)}{span}</td>'
+                f'{v_str}{span}</td>'
             )
         rows_html.append(f'<tr style="line-height:1.6">{"".join(cells)}</tr>')
 
@@ -807,37 +735,23 @@ def render_dim_tab(df_raw, dim_label, compare_on, tab_key, extra_charts_fn=None)
         extra_charts_fn(df)
 
     # ── Table ───────────────────────────────────────────────────────────────
-    _has_share = 'Share %' in df.columns
-    _has_comp  = 'Completed' in df.columns
-    _has_canc  = 'Cancelled' in df.columns
     if compare_on and 'Sales vs Prev %' in df.columns:
         _has_prev = '_PrevSales' in df.columns
-        _vfmt = {'Sales': '{:,.0f}', 'Orders': '{:,}', 'AOV': '{:,.0f}'}
-        _clabels = {
-            dim_label: dim_label,
-            'Sales':   'Sales (SAR)',
-            'Orders':  'Orders',
-            'AOV':     'AOV (SAR)',
-            'Sales vs Prev %':  'vs Prev',
-            'Orders vs Prev %': 'vs Prev',
-            'AOV vs Prev %':    'vs Prev',
-        }
-        if _has_share:
-            _vfmt['Share %'] = '{:.1f}%'
-            _clabels['Share %'] = 'Share %'
-        if _has_comp:
-            _vfmt['Completed'] = '{:,}'
-            _clabels['Completed'] = 'Completed'
-        if _has_canc:
-            _vfmt['Cancelled'] = '{:,}'
-            _clabels['Cancelled'] = 'Cancelled'
         render_comparison_table(
             df,
             growth_map={'Sales':  'Sales vs Prev %',
                         'Orders': 'Orders vs Prev %',
                         'AOV':    'AOV vs Prev %'},
-            value_format=_vfmt,
-            col_labels=_clabels,
+            value_format={'Sales': '{:,.0f}', 'Orders': '{:,}', 'AOV': '{:,.0f}'},
+            col_labels={
+                dim_label: dim_label,
+                'Sales':   'Sales (SAR)',
+                'Orders':  'Orders',
+                'AOV':     'AOV (SAR)',
+                'Sales vs Prev %':  'vs Prev',
+                'Orders vs Prev %': 'vs Prev',
+                'AOV vs Prev %':    'vs Prev',
+            },
             prev_map={
                 'Sales':  '_PrevSales',
                 'Orders': '_PrevOrders',
@@ -851,55 +765,27 @@ def render_dim_tab(df_raw, dim_label, compare_on, tab_key, extra_charts_fn=None)
         )
     else:
         vfmt = {c: v for c, v in
-                {'Sales': '{:,.0f}', 'Orders': '{:,}', 'AOV': '{:,.0f}',
-                 'Share %': '{:.1f}%', 'Completed': '{:,}', 'Cancelled': '{:,}'}.items()
+                {'Sales': '{:,.0f}', 'Orders': '{:,}', 'AOV': '{:,.0f}'}.items()
                 if c in df.columns}
-        col_cfg = {
-            dim_label:   st.column_config.TextColumn(dim_label),
-            'Sales':     st.column_config.TextColumn('Sales (SAR)'),
-            'Orders':    st.column_config.TextColumn('Orders'),
-            'AOV':       st.column_config.TextColumn('AOV (SAR)'),
-        }
-        if _has_share:
-            col_cfg['Share %']   = st.column_config.TextColumn('Share %')
-        if _has_comp:
-            col_cfg['Completed'] = st.column_config.TextColumn('Completed')
-        if _has_canc:
-            col_cfg['Cancelled'] = st.column_config.TextColumn('Cancelled')
         st.dataframe(
             df.style.format(vfmt, na_rep='—'),
             use_container_width=True,
             hide_index=True,
             height=min(700, 60 + 35 * len(df)),
-            column_config=col_cfg,
+            column_config={
+                dim_label: st.column_config.TextColumn(dim_label),
+                'Sales':   st.column_config.TextColumn('Sales (SAR)'),
+                'Orders':  st.column_config.TextColumn('Orders'),
+                'AOV':     st.column_config.TextColumn('AOV (SAR)'),
+            },
         )
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ══════════════════════════════════════════════════════════════════════════════
-# HISTORICAL SCAFFOLD — computed ONCE, reused by Brands / Aggregators /
-# Technologies / Summary snapshot tables.
-# Filters df_all_o by the current brand/provider/technology/location/items
-# filters but WITHOUT a date constraint, giving the "ever active under current
-# filters" set for each dimension.
-# ══════════════════════════════════════════════════════════════════════════════
-_hist_o = df_all_o[
-    df_all_o['Brand'].isin(active_brands) &
-    df_all_o['Provider'].isin(active_provs) &
-    df_all_o['Technology'].isin(active_techs) &
-    df_all_o['Location'].isin(active_locs)
-]
-_hist_item_ids = master_map[master_map['Items'].isin(active_items)]['Order ID'].unique()
-_hist_o = _hist_o[_hist_o['Order ID'].isin(_hist_item_ids)]
-
-_sc_brand    = set(_hist_o['Brand'].dropna().unique())
-_sc_provider = set(_hist_o['Provider'].dropna().unique())
-_sc_tech     = set(_hist_o['Technology'].dropna().unique())
-
 # TABS
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("<br>", unsafe_allow_html=True)
-tab_summary, tab_orders, tab_lost, tab_items, tab_branches, tab_aggs, tab_brands, tab_tech, tab_time, tab_monthly, tab_matrix, tab_branch_drill, tab_ai = st.tabs(
-    ["📊 Summary", "📦 Orders", "🚫 Lost Orders", "🛒 Items", "📍 Branches", "🚚 Aggregators", "🏷️ Brands", "⚙️ Technologies", "⏰ Time Analysis", "📅 Monthly Trends", "🔀 Brand × Aggregator", "🔍 Branch Drill-Down", "💬 Ask AI Analyst"]
+tab_summary, tab_orders, tab_lost, tab_items, tab_branches, tab_aggs, tab_brands, tab_tech, tab_time, tab_monthly, tab_matrix, tab_branch_drill = st.tabs(
+    ["📊 Summary", "📦 Orders", "🚫 Lost Orders", "🛒 Items", "📍 Branches", "🚚 Aggregators", "🏷️ Brands", "⚙️ Technologies", "⏰ Time Analysis", "📅 Monthly Trends", "🔀 Brand × Aggregator", "🔍 Branch Drill-Down"]
 )
 
 # ── Summary timeline with current vs previous overlay
@@ -967,124 +853,6 @@ with tab_summary:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="exp_summary",
         )
-
-        # ── DIMENSION SUMMARY TABLES ─────────────────────────────────────────
-        st.markdown("---")
-        st.markdown("### 📋 Performance Snapshot by Dimension")
-
-        # Scaffold map for the Summary snapshot tables — same historical sets
-        # computed before the tabs section.
-        _snap_scaffolds = {
-            'Brand':      _sc_brand,
-            'Location':   set(_hist_o['Location'].dropna().unique()),
-            'Provider':   _sc_provider,
-            'Technology': _sc_tech,
-        }
-
-        def _build_snapshot(cur_df, old_df, dim_col):
-            """Revenue / Orders / AOV per dimension; adds % vs prev when comparison is on.
-            Uses _snap_scaffolds so zero-this-period but historically active rows appear."""
-            sc = _snap_scaffolds.get(dim_col)
-            cur = cur_df.groupby(dim_col).agg(
-                Revenue=('Sales',    'sum'),
-                Orders =('Order ID', 'count'),
-            ).reset_index()
-            if sc is not None:
-                _sc_df = pd.DataFrame({dim_col: sorted(sc)})
-                cur = _sc_df.merge(cur, on=dim_col, how='left')
-                cur['Revenue'] = cur['Revenue'].fillna(0)
-                cur['Orders']  = cur['Orders'].fillna(0).astype(int)
-            cur['AOV'] = (cur['Revenue'] / cur['Orders'].where(cur['Orders'] > 0)).round(0)
-            if not compare_on or old_df.empty:
-                return cur.sort_values('Revenue', ascending=False).reset_index(drop=True)
-            old = old_df.groupby(dim_col).agg(
-                _PrevRevenue=('Sales',    'sum'),
-                _PrevOrders =('Order ID', 'count'),
-            ).reset_index()
-            _merge = 'left' if sc is not None else 'outer'
-            df = cur.merge(old, on=dim_col, how=_merge)
-            for c in ['Revenue', 'Orders', '_PrevRevenue', '_PrevOrders']:
-                df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
-            df['AOV'] = (df['Revenue'] / df['Orders'].where(df['Orders'] > 0)).round(0)
-            _prev_aov = (df['_PrevRevenue'] / df['_PrevOrders'].where(df['_PrevOrders'] > 0))
-            df['_PrevAOV'] = _prev_aov.round(0)
-            df['Revenue vs Prev %'] = ((df['Revenue'] - df['_PrevRevenue']) /
-                                        df['_PrevRevenue'].where(df['_PrevRevenue'] > 0)) * 100
-            df['Orders vs Prev %']  = ((df['Orders']  - df['_PrevOrders']) /
-                                        df['_PrevOrders'].where(df['_PrevOrders'] > 0)) * 100
-            df['AOV vs Prev %']     = ((df['AOV'] - _prev_aov) /
-                                        _prev_aov.where(_prev_aov > 0)) * 100
-            return df.sort_values('Revenue', ascending=False).reset_index(drop=True)
-
-        def _render_snapshot(df, dim_col):
-            """Plain dataframe or comparison table depending on compare_on."""
-            if compare_on and 'Revenue vs Prev %' in df.columns:
-                render_comparison_table(
-                    df,
-                    growth_map={
-                        'Revenue': 'Revenue vs Prev %',
-                        'Orders':  'Orders vs Prev %',
-                        'AOV':     'AOV vs Prev %',
-                    },
-                    value_format={
-                        'Revenue': '{:,.0f}',
-                        'Orders':  '{:,}',
-                        'AOV':     '{:,.0f}',
-                    },
-                    col_labels={
-                        'Revenue':          'Revenue (SAR)',
-                        'Revenue vs Prev %':'vs Prev',
-                        'Orders vs Prev %': 'vs Prev',
-                        'AOV vs Prev %':    'vs Prev',
-                    },
-                    prev_map={
-                        'Revenue': '_PrevRevenue',
-                        'Orders':  '_PrevOrders',
-                        'AOV':     '_PrevAOV',
-                    },
-                    prev_format={
-                        'Revenue': '{:,.0f}',
-                        'Orders':  '{:,}',
-                        'AOV':     '{:,.0f}',
-                    },
-                    max_height="500px",
-                )
-            else:
-                st.dataframe(
-                    df[[ dim_col, 'Revenue', 'Orders', 'AOV' ]]
-                      .style.format({
-                          'Revenue': '{:,.0f}',
-                          'Orders':  '{:,}',
-                          'AOV':     '{:,.0f}',
-                      }, na_rep='—'),
-                    use_container_width=True,
-                    hide_index=True,
-                    height=min(500, 60 + 35 * len(df)),
-                    column_config={
-                        'Revenue': st.column_config.TextColumn('Revenue (SAR)'),
-                        'AOV':     st.column_config.TextColumn('AOV (SAR)'),
-                    },
-                )
-
-        _sn_c1, _sn_c2 = st.columns(2)
-        with _sn_c1:
-            st.markdown("#### 🏷️ By Brand")
-            _render_snapshot(_build_snapshot(o_cur, o_old, 'Brand'), 'Brand')
-
-        with _sn_c2:
-            st.markdown("#### 📍 By Branch")
-            _snap_branch = _build_snapshot(o_cur, o_old, 'Location').rename(columns={'Location': 'Branch'})
-            _render_snapshot(_snap_branch, 'Branch')
-
-        _sn_c3, _sn_c4 = st.columns(2)
-        with _sn_c3:
-            st.markdown("#### 🚚 By Aggregator")
-            _render_snapshot(_build_snapshot(o_cur, o_old, 'Provider'), 'Provider')
-
-        with _sn_c4:
-            st.markdown("#### ⚙️ By Technology")
-            _render_snapshot(_build_snapshot(o_cur, o_old, 'Technology'), 'Technology')
-
     else:
         st.info("No timeline data found for current filters.")
 
@@ -1100,8 +868,7 @@ with tab_orders:
         ).reset_index()
         daily_all['Completed'] = daily_all['Total'] - daily_all['Cancelled'] - daily_all['InProgress']
         # Fill Rate only over orders with a definitive outcome
-        _fr_sum = daily_all['Completed'] + daily_all['Cancelled']
-        _fr_denom = _fr_sum.where(_fr_sum > 0)
+        _fr_denom = (daily_all['Completed'] + daily_all['Cancelled']).replace(0, pd.NA)
         daily_all['Fill Rate %'] = (daily_all['Completed'] / _fr_denom * 100)
 
         daily_rev = o_cur.groupby('Date').agg(
@@ -1114,7 +881,7 @@ with tab_orders:
                           .groupby('Date')['Sales'].sum()
                           .reset_index().rename(columns={'Sales': 'CancelledRev'}))
         daily_rev = daily_rev.merge(daily_canc_rev, on='Date', how='left').fillna({'CancelledRev': 0})
-        daily_rev['AOV'] = daily_rev['CompletedRev'] / daily_rev['TotalOrders'].where(daily_rev['TotalOrders'] > 0)
+        daily_rev['AOV'] = daily_rev['CompletedRev'] / daily_rev['TotalOrders'].replace(0, pd.NA)
 
         # ── CHART 1a: Daily order volume (stacked bar) ──────────────────────
         st.markdown("#### 📊 Daily Orders: Completed vs In Progress vs Cancelled")
@@ -1250,7 +1017,7 @@ with tab_orders:
             old_aov = o_old.groupby('Date').agg(
                 Sales=('Sales','sum'), Orders=('Order ID','count')
             ).reset_index()
-            old_aov['AOV'] = old_aov['Sales'] / old_aov['Orders'].where(old_aov['Orders'] > 0)
+            old_aov['AOV'] = old_aov['Sales'] / old_aov['Orders'].replace(0, pd.NA)
             cmp_offset = pd.Timestamp(sd) - pd.Timestamp(cmp_s)
             old_aov['Aligned Date'] = old_aov['Date'] + cmp_offset
             fig_aov.add_trace(go.Scatter(
@@ -1284,8 +1051,7 @@ with tab_orders:
             old_daily['_OldCompleted'] = (
                 old_daily['_OldOrders'] - old_daily['_OldCancelled'] - old_daily['_OldInProgress']
             ).clip(lower=0)
-            _old_fr_sum = old_daily['_OldCompleted'] + old_daily['_OldCancelled']
-            _old_fr_denom = _old_fr_sum.where(_old_fr_sum > 0)
+            _old_fr_denom = (old_daily['_OldCompleted'] + old_daily['_OldCancelled']).replace(0, pd.NA)
             old_daily['_OldFillRate']  = (old_daily['_OldCompleted'] / _old_fr_denom * 100)
             old_rev_d = o_old.groupby('Date').agg(_OldRev=('Sales','sum'),
                                                    _OldRevOrds=('Order ID','count')).reset_index()
@@ -1414,16 +1180,14 @@ with tab_lost:
     else:
         total_cancelled = len(lost_cur)
         lost_revenue    = lost_cur['Sales'].sum()
-        # Cancellation Rate uses the SAME denominator as the Summary "Fail Rate":
-        # resolved orders (Completed + Cancelled), excluding In Progress.
-        _resolved_cur   = comp_cur + rej_cur
-        cancel_rate     = (total_cancelled / _resolved_cur * 100) if _resolved_cur > 0 else 0.0
+        total_orders_fr = len(o_cur_fr)
+        cancel_rate     = (total_cancelled / total_orders_fr * 100) if total_orders_fr > 0 else 0.0
 
         # Previous-period equivalents
         total_cancelled_old = len(lost_old)
         lost_revenue_old    = lost_old['Sales'].sum() if not lost_old.empty else 0.0
-        _resolved_old       = comp_old + rej_old
-        cancel_rate_old     = (total_cancelled_old / _resolved_old * 100) if _resolved_old > 0 else 0.0
+        total_orders_fr_old = len(o_old_fr)
+        cancel_rate_old     = (total_cancelled_old / total_orders_fr_old * 100) if total_orders_fr_old > 0 else 0.0
 
         # KPI tiles for the Lost Orders view (deltas use inverse coloring
         # because MORE cancellations / lost revenue is BAD, not good).
@@ -1443,7 +1207,6 @@ with tab_lost:
             k[1].metric("💸 Lost Revenue", f"{lost_revenue:,.0f} SAR")
             k[2].metric("📉 Cancellation Rate", f"{cancel_rate:.1f}%")
 
-        st.caption("Cancellation Rate = cancelled ÷ resolved orders (Completed + Cancelled). In Progress orders are excluded, so this matches the **Fail Rate** shown on the Summary tab.")
         st.markdown("---")
 
         # Daily cancellation trend
@@ -1477,16 +1240,9 @@ with tab_lost:
             cur_g.columns = [dim, 'Cancelled', 'Lost Revenue']
             tot_cur = fr_cur.groupby(dim).size().reset_index()
             tot_cur.columns = [dim, 'Total Orders']
-            # In Progress per dimension — excluded from the rate denominator so
-            # Cancel Rate matches the Summary "Fail Rate" (resolved orders only).
-            inp_cur = (fr_cur[fr_cur['Status'].isin(IN_PROGRESS_STATUSES)]
-                       .groupby(dim).size().reset_index())
-            inp_cur.columns = [dim, '_InProgress']
-            cur_g = (cur_g.merge(tot_cur, on=dim, how='left')
-                          .merge(inp_cur, on=dim, how='left').fillna(0))
-            _resolved_cur = (cur_g['Total Orders'] - cur_g['_InProgress'])
+            cur_g = cur_g.merge(tot_cur, on=dim, how='left').fillna(0)
             cur_g['Cancel Rate %'] = (cur_g['Cancelled'] /
-                                      _resolved_cur.where(_resolved_cur > 0)) * 100
+                                      cur_g['Total Orders'].where(cur_g['Total Orders'] > 0)) * 100
             # Column order: dimension → Total Orders → Cancelled → Lost Revenue → Cancel Rate
             cur_g = cur_g[[dim, 'Total Orders', 'Cancelled', 'Lost Revenue', 'Cancel Rate %']]
             if not with_compare or old_lost.empty:
@@ -1497,15 +1253,9 @@ with tab_lost:
             ).reset_index()
             tot_old = fr_old.groupby(dim).size().reset_index()
             tot_old.columns = [dim, '_PrevTotal']
-            inp_old = (fr_old[fr_old['Status'].isin(IN_PROGRESS_STATUSES)]
-                       .groupby(dim).size().reset_index())
-            inp_old.columns = [dim, '_PrevInProgress']
-            old_g = (old_g.merge(tot_old, on=dim, how='left')
-                          .merge(inp_old, on=dim, how='left').fillna(0))
-            _resolved_old = (old_g['_PrevTotal'] - old_g['_PrevInProgress'])
+            old_g = old_g.merge(tot_old, on=dim, how='left').fillna(0)
             old_g['_PrevCancelRate'] = (old_g['_PrevCancelled'] /
-                                        _resolved_old.where(_resolved_old > 0)) * 100
-            old_g = old_g.drop(columns=['_PrevInProgress'])
+                                        old_g['_PrevTotal'].where(old_g['_PrevTotal'] > 0)) * 100
 
             df = cur_g.merge(old_g, on=dim, how='outer')
             for c in ['Total Orders', 'Cancelled', 'Lost Revenue', 'Cancel Rate %',
@@ -1674,9 +1424,9 @@ with tab_items:
             old_items.columns = ['Item', '_PrevSales', '_PrevQty']
             items_df = cur_items.merge(old_items, on='Item', how='outer').fillna(0)
             items_df['Sales vs Prev %'] = ((items_df['Sales'] - items_df['_PrevSales']) /
-                                           items_df['_PrevSales'].where(items_df['_PrevSales'] > 0)) * 100
+                                           items_df['_PrevSales'].replace(0, pd.NA)) * 100
             items_df['Qty vs Prev %']   = ((items_df['Qty']   - items_df['_PrevQty'])   /
-                                           items_df['_PrevQty'].where(items_df['_PrevQty'] > 0))   * 100
+                                           items_df['_PrevQty'].replace(0, pd.NA))   * 100
             # _PrevSales and _PrevQty kept for "was X" display via prev_map
             items_df = items_df[['Item', 'Sales', 'Sales vs Prev %', '_PrevSales',
                                   'Qty', 'Qty vs Prev %', '_PrevQty']]
@@ -1704,18 +1454,15 @@ with tab_items:
             )
         items_df = items_df.sort_values(_i_sort, ascending=_i_dir.startswith('↑')).reset_index(drop=True)
 
-        # Top 10 chart respects the selected measure (Sales or Qty)
-        _chart_col   = _i_sort   # 'Sales' or 'Qty'
-        _chart_label = _items_sort_labels.get(_chart_col, _chart_col)
-        top10 = items_df.nlargest(10, _chart_col)
-        fig_i = px.bar(top10, x=_chart_col, y='Item', orientation='h',
-                       color_discrete_sequence=[ct['accent']], template="plotly_dark", text=_chart_col)
+        # Top 10 chart always uses Sales-sorted top 10
+        top10 = items_df.nlargest(10, 'Sales')
+        fig_i = px.bar(top10, x='Sales', y='Item', orientation='h',
+                       color_discrete_sequence=[ct['accent']], template="plotly_dark", text='Sales')
         fig_i.update_traces(texttemplate='%{text:,.0f}', textposition='outside')
         fig_i.update_layout(dragmode='pan', paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                             height=420, margin=dict(t=20, b=20),
-                            xaxis=dict(title=_chart_label),
                             yaxis=dict(autorange="reversed"), showlegend=False)
-        st.markdown(f"#### Top 10 Items by {_chart_label}")
+        st.markdown("#### Top 10 Items by Sales")
         st.plotly_chart(fig_i, use_container_width=True, config={'scrollZoom': False, 'displayModeBar': 'hover'})
 
         st.markdown("#### Full Items Breakdown")
@@ -1755,66 +1502,37 @@ with tab_items:
 with tab_branches:
     st.markdown("### 📍 Sales by Branch")
     if not o_cur.empty:
-        # ── Scaffold: branches that have at least one order in the FULL date
-        # range under the current brand/provider/technology/items filters.
-        # This shows zero-order-this-period branches (e.g. a branch that traded
-        # in Jan–Apr but not May) while excluding ghost locations that never
-        # had real orders under the current filter combination.
-        _hist_o = df_all_o[
-            df_all_o['Brand'].isin(active_brands) &
-            df_all_o['Provider'].isin(active_provs) &
-            df_all_o['Technology'].isin(active_techs) &
-            df_all_o['Location'].isin(active_locs)
-        ]
-        _hist_ids = master_map[master_map['Items'].isin(active_items)]['Order ID'].unique()
-        _hist_o = _hist_o[_hist_o['Order ID'].isin(_hist_ids)]
-        _br_scaffold = pd.DataFrame({'Branch': sorted(_hist_o['Location'].dropna().unique())})
-
-        # Current period: sales + total orders — left-join preserves zero rows.
-        _cur_agg = (o_cur.groupby('Location')
-                    .agg(Sales=('Sales','sum'), Orders=('Order ID','count'))
-                    .reset_index()
-                    .rename(columns={'Location':'Branch','Sales':'Current Sales','Orders':'Total Orders'}))
-        cur_b = _br_scaffold.merge(_cur_agg, on='Branch', how='left')
-        cur_b['Current Sales'] = cur_b['Current Sales'].fillna(0)
-        cur_b['Total Orders']  = cur_b['Total Orders'].fillna(0).astype(int)
-
-        # ── Active branches = those with at least one order this period ──────
-        _active_br_cur = int((cur_b['Total Orders'] > 0).sum())
-        _bm = st.columns(4)
-        if compare_on and not o_old.empty:
-            _active_br_old = o_old['Location'].nunique()
-            _bm[0].metric("🏢 Active Branches", f"{_active_br_cur:,}",
-                          f"{_active_br_cur - _active_br_old:+d}  ·  was {_active_br_old:,}")
-        else:
-            _bm[0].metric("🏢 Active Branches", f"{_active_br_cur:,}")
+        # Current period: sales + total orders per branch
+        cur_b = o_cur.groupby('Location').agg(
+            Sales=('Sales','sum'),
+            Orders=('Order ID','count'),
+        ).reset_index()
+        cur_b.columns = ['Branch', 'Current Sales', 'Total Orders']
 
         # Status-unfiltered slice for accurate Completed / In Progress / Rejected / Fill Rate
-        b_total = (o_cur_fr.groupby('Location').size().reset_index()
-                   .rename(columns={'Location':'Branch', 0:'TotalFR'}))
+        b_total = o_cur_fr.groupby('Location').size().reset_index()
+        b_total.columns = ['Branch', 'TotalFR']
         b_rej_g = (o_cur_fr[o_cur_fr['Status'].isin(REJECTED_STATUSES)]
-                   .groupby('Location').size().reset_index()
-                   .rename(columns={'Location':'Branch', 0:'Rejected'}))
+                   .groupby('Location').size().reset_index())
+        b_rej_g.columns = ['Branch', 'Rejected']
         b_inp_g = (o_cur_fr[o_cur_fr['Status'].isin(IN_PROGRESS_STATUSES)]
-                   .groupby('Location').size().reset_index()
-                   .rename(columns={'Location':'Branch', 0:'InProgress'}))
+                   .groupby('Location').size().reset_index())
+        b_inp_g.columns = ['Branch', 'InProgress']
 
         branches = (cur_b
                     .merge(b_total, on='Branch', how='left')
                     .merge(b_rej_g, on='Branch', how='left')
                     .merge(b_inp_g, on='Branch', how='left'))
-        branches['Rejected']   = branches['Rejected'].fillna(0).astype(int)
-        branches['TotalFR']    = branches['TotalFR'].fillna(0).astype(int)
-        branches['InProgress'] = branches['InProgress'].fillna(0).astype(int)
-        branches['Completed']  = (branches['TotalFR'] - branches['Rejected'] - branches['InProgress']).clip(lower=0).astype(int)
-
-        _br_fr_sum   = branches['Completed'] + branches['Rejected']
-        _br_fr_denom = _br_fr_sum.where(_br_fr_sum > 0)
-        # Zero-order branches get NaN (displayed as —) for rate/AOV columns
-        # rather than misleading 100% / 0% defaults.
-        branches['Fill Rate %'] = (branches['Completed'] / _br_fr_denom * 100).where(branches['Total Orders'] > 0)
-        branches['Fail Rate %'] = (branches['Rejected']  / _br_fr_denom * 100).where(branches['Total Orders'] > 0)
-        branches['AOV']         = (branches['Current Sales'] / branches['Total Orders'].where(branches['Total Orders'] > 0)).where(branches['Total Orders'] > 0)
+        branches['Rejected']    = branches['Rejected'].fillna(0).astype(int)
+        branches['TotalFR']     = branches['TotalFR'].fillna(0).astype(int)
+        branches['InProgress']  = branches['InProgress'].fillna(0).astype(int)
+        # Completed = only orders with a definitive positive outcome.
+        # In Progress is excluded from both Completed and the Fill Rate denominator
+        # so that pending orders do not inflate the fill rate (same logic as KPI tile).
+        branches['Completed']   = (branches['TotalFR'] - branches['Rejected'] - branches['InProgress']).clip(lower=0).astype(int)
+        _br_fr_denom = (branches['Completed'] + branches['Rejected']).replace(0, pd.NA)
+        branches['Fill Rate %'] = (branches['Completed'] / _br_fr_denom * 100).fillna(100)
+        branches['AOV']         = branches['Current Sales'] / branches['Total Orders'].replace(0, pd.NA)
 
         if compare_on and not o_old.empty:
             # Aggregate all previous-period metrics per branch
@@ -1837,19 +1555,17 @@ with tab_branches:
             for c in ['_PrevSales','_PrevOrders','_PrevTotalFR','_PrevRejected','_PrevInProgress']:
                 old_b[c] = pd.to_numeric(old_b[c], errors='coerce').fillna(0)
             old_b['_PrevCompleted'] = (old_b['_PrevTotalFR'] - old_b['_PrevRejected'] - old_b['_PrevInProgress']).clip(lower=0)
-            _denom_old_sum = old_b['_PrevCompleted'] + old_b['_PrevRejected']
-            _denom_old = _denom_old_sum.where(_denom_old_sum > 0)
+            _denom_old = (old_b['_PrevCompleted'] + old_b['_PrevRejected']).replace(0, pd.NA)
             old_b['_PrevFillRate']  = (old_b['_PrevCompleted'] / _denom_old * 100).fillna(100)
-            old_b['_PrevFailRate']  = (old_b['_PrevRejected'] / _denom_old * 100).fillna(0)
             old_b['_PrevAOV']       = (old_b['_PrevSales'] /
                                        old_b['_PrevOrders'].where(old_b['_PrevOrders'] > 0))
 
             branches = branches.merge(old_b[['Branch','_PrevSales','_PrevOrders',
                                               '_PrevCompleted','_PrevRejected',
-                                              '_PrevFillRate','_PrevFailRate','_PrevAOV']],
+                                              '_PrevFillRate','_PrevAOV']],
                                       on='Branch', how='left')
             for c in ['_PrevSales','_PrevOrders','_PrevCompleted','_PrevRejected',
-                       '_PrevFillRate','_PrevFailRate','_PrevAOV']:
+                       '_PrevFillRate','_PrevAOV']:
                 branches[c] = pd.to_numeric(branches[c], errors='coerce').fillna(0)
 
             def _pct_diff(cur, prev): return ((cur - prev) / prev.where(prev > 0)) * 100
@@ -1858,7 +1574,6 @@ with tab_branches:
             branches['Completed vs Prev %'] = _pct_diff(branches['Completed'],     branches['_PrevCompleted'])
             branches['Rejected vs Prev %']  = _pct_diff(branches['Rejected'],      branches['_PrevRejected'])
             branches['Fill Rate vs Prev pp']= branches['Fill Rate %'] - branches['_PrevFillRate']
-            branches['Fail Rate vs Prev pp']= branches['Fail Rate %'] - branches['_PrevFailRate']
             branches['AOV vs Prev %']       = _pct_diff(branches['AOV'],           branches['_PrevAOV'])
             # _Prev* columns are kept (not dropped) so render_comparison_table can
             # show "was X" alongside each % arrow via prev_map.
@@ -1868,20 +1583,19 @@ with tab_branches:
                           'Completed',      'Completed vs Prev %',  '_PrevCompleted',
                           'Rejected',       'Rejected vs Prev %',   '_PrevRejected',
                           'Fill Rate %',    'Fill Rate vs Prev pp', '_PrevFillRate',
-                          'Fail Rate %',    'Fail Rate vs Prev pp', '_PrevFailRate',
                           'AOV',            'AOV vs Prev %',        '_PrevAOV']
         else:
-            cols_order = ['Branch','Current Sales','Total Orders','Completed','Rejected','Fill Rate %','Fail Rate %','AOV']
+            cols_order = ['Branch','Current Sales','Total Orders','Completed','Rejected','Fill Rate %','AOV']
 
         branches = branches[[c for c in cols_order if c in branches.columns]]
 
         # ── Sort controls + Export ──────────────────────────────────────────
-        _b_sort_opts = ['Current Sales', 'Total Orders', 'Completed', 'Rejected', 'Fill Rate %', 'Fail Rate %', 'AOV']
+        _b_sort_opts = ['Current Sales', 'Total Orders', 'Completed', 'Rejected', 'Fill Rate %', 'AOV']
         _b_sort_opts = [c for c in _b_sort_opts if c in branches.columns]
         _branch_sort_labels = {
             'Current Sales': 'Sales (SAR)', 'Total Orders': 'Orders',
             'Completed': 'Completed', 'Rejected': 'Rejected',
-            'Fill Rate %': 'Fill Rate %', 'Fail Rate %': 'Fail Rate %', 'AOV': 'AOV (SAR)',
+            'Fill Rate %': 'Fill Rate %', 'AOV': 'AOV (SAR)',
         }
         _b1, _b2, _b3 = st.columns([2, 1.5, 1])
         with _b1:
@@ -1901,7 +1615,6 @@ with tab_branches:
                 key="exp_branches",
             )
         branches = branches.sort_values(_b_sort, ascending=_b_dir.startswith('↑')).reset_index(drop=True)
-        branches.insert(0, '#', range(1, len(branches) + 1))
 
         # Top-10 / Bottom-10 highlight (applied to the Sales-rank position)
         # Re-rank by Sales to get correct highlight positions regardless of sort
@@ -1930,42 +1643,35 @@ with tab_branches:
                     'Completed':     'Completed vs Prev %',
                     'Rejected':      'Rejected vs Prev %',
                     'Fill Rate %':   'Fill Rate vs Prev pp',
-                    'Fail Rate %':   'Fail Rate vs Prev pp',
                     'AOV':           'AOV vs Prev %',
                 },
                 value_format={
-                    '#':             '{:,}',
                     'Current Sales': '{:,.0f}',
                     'Total Orders':  '{:,}',
                     'Completed':     '{:,}',
                     'Rejected':      '{:,}',
                     'Fill Rate %':   '{:.1f}%',
-                    'Fail Rate %':   '{:.1f}%',
                     'AOV':           '{:,.0f}',
                 },
                 col_labels={
-                    '#':                    '#',
                     'Current Sales':        'Sales (SAR)',
                     'Total Orders':         'Orders',
                     'Fill Rate %':          'Fill Rate',
-                    'Fail Rate %':          'Fail Rate',
                     'AOV':                  'AOV (SAR)',
                     'Sales vs Prev %':      'vs Prev',
                     'Orders vs Prev %':     'vs Prev',
                     'Completed vs Prev %':  'vs Prev',
                     'Rejected vs Prev %':   'vs Prev',
                     'Fill Rate vs Prev pp': 'vs Prev',
-                    'Fail Rate vs Prev pp': 'vs Prev',
                     'AOV vs Prev %':        'vs Prev',
                 },
-                inverse_cols={'Rejected', 'Fail Rate %'},
+                inverse_cols={'Rejected'},
                 prev_map={
                     'Current Sales': '_PrevSales',
                     'Total Orders':  '_PrevOrders',
                     'Completed':     '_PrevCompleted',
                     'Rejected':      '_PrevRejected',
                     'Fill Rate %':   '_PrevFillRate',
-                    'Fail Rate %':   '_PrevFailRate',
                     'AOV':           '_PrevAOV',
                 } if _has_br_prev else {},
                 prev_format={
@@ -1974,28 +1680,25 @@ with tab_branches:
                     'Completed':     '{:,}',
                     'Rejected':      '{:,}',
                     'Fill Rate %':   '{:.1f}%',
-                    'Fail Rate %':   '{:.1f}%',
                     'AOV':           '{:,.0f} SAR',
                 },
             )
         else:
             fmt_map = {'Current Sales':'{:,.0f}','Total Orders':'{:,}',
                        'Completed':'{:,}','Rejected':'{:,}',
-                       'Fill Rate %':'{:.1f}%','Fail Rate %':'{:.1f}%','AOV':'{:,.0f}'}
+                       'Fill Rate %':'{:.1f}%','AOV':'{:,.0f}'}
             fmt_apply = {k: v for k, v in fmt_map.items() if k in branches.columns}
             styled = (branches.style
                       .apply(_highlight_topbot, axis=None)
                       .format(fmt_apply, na_rep='—'))
             st.dataframe(styled, use_container_width=True, hide_index=True,
                          column_config={
-                             "#":             st.column_config.NumberColumn("#", width="small"),
                              "Branch":        st.column_config.TextColumn("Branch"),
                              "Current Sales": st.column_config.TextColumn("Sales (SAR)"),
                              "Total Orders":  st.column_config.TextColumn("Orders"),
                              "Completed":     st.column_config.TextColumn("Completed"),
                              "Rejected":      st.column_config.TextColumn("Rejected"),
                              "Fill Rate %":   st.column_config.TextColumn("Fill Rate %"),
-                             "Fail Rate %":   st.column_config.TextColumn("Fail Rate %"),
                              "AOV":           st.column_config.TextColumn("AOV (SAR)"),
                          },
                          height=min(700, 60 + 35 * len(branches)))
@@ -2006,129 +1709,54 @@ with tab_branches:
 # ── Aggregators tab
 with tab_aggs:
     st.markdown("### 🚚 Aggregator Performance")
-    df_agg = build_dim_comparison(o_cur, o_old, 'Provider', compare_on, scaffold=_sc_provider)
+    df_agg = build_dim_comparison(o_cur, o_old, 'Provider', compare_on)
     df_agg = df_agg.rename(columns={'Provider': 'Aggregator'})
-    # ── % contribution to total sales ──────────────────────────────────────
-    _agg_total = df_agg['Sales'].sum()
-    df_agg.insert(
-        df_agg.columns.get_loc('Sales') + 1,
-        'Share %',
-        (df_agg['Sales'] / _agg_total * 100).round(1) if _agg_total > 0 else 0.0,
-    )
-    # ── Per-aggregator Completed / Cancelled (from status-unfiltered slice) ─
-    _agg_comp = (o_cur_fr[o_cur_fr['Status'] == 'Completed']
-                 .groupby('Provider').size().rename('Completed'))
-    _agg_canc = (o_cur_fr[o_cur_fr['Status'].isin(REJECTED_STATUSES)]
-                 .groupby('Provider').size().rename('Cancelled'))
-    _agg_comp.index.name = 'Aggregator'; _agg_canc.index.name = 'Aggregator'
-    df_agg = df_agg.join(_agg_comp, on='Aggregator').join(_agg_canc, on='Aggregator')
-    df_agg['Completed'] = df_agg['Completed'].fillna(0).astype(int)
-    df_agg['Cancelled'] = df_agg['Cancelled'].fillna(0).astype(int)
 
     def _agg_charts(df):
         if df.empty:
             return
-        _ac1, _ac2 = st.columns(2)
-        with _ac1:
-            fig_ag = px.bar(
-                df.head(10), x='Sales', y='Aggregator', orientation='h',
-                color_discrete_sequence=[ct['secondary']], template="plotly_dark", text='Sales',
-            )
-            fig_ag.update_traces(texttemplate='%{text:,.0f}', textposition='outside')
-            fig_ag.update_layout(dragmode='pan',
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                height=max(260, 50 * min(len(df), 10) + 60),
-                margin=dict(t=30, b=20), yaxis=dict(autorange="reversed"), showlegend=False,
-                title=dict(text="Sales by Aggregator", font=dict(size=13)),
-            )
-            st.plotly_chart(fig_ag, use_container_width=True, config={'scrollZoom': False, 'displayModeBar': 'hover'})
-        with _ac2:
-            fig_pie = px.pie(
-                df, values='Sales', names='Aggregator',
-                color_discrete_sequence=ct['pal'], template="plotly_dark", hole=0.45,
-            )
-            fig_pie.update_traces(
-                textinfo='label+percent',
-                hovertemplate="<b>%{label}</b><br>Sales: %{value:,.0f} SAR<br>Share: %{percent}<extra></extra>",
-            )
-            fig_pie.update_layout(dragmode='pan',
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                height=max(260, 50 * min(len(df), 10) + 60),
-                margin=dict(t=30, b=20), showlegend=True,
-                title=dict(text="Sales Contribution by Aggregator", font=dict(size=13)),
-            )
-            st.plotly_chart(fig_pie, use_container_width=True, config={'scrollZoom': False, 'displayModeBar': 'hover'})
+        fig_ag = px.bar(
+            df.head(10), x='Sales', y='Aggregator', orientation='h',
+            color_discrete_sequence=[ct['secondary']], template="plotly_dark", text='Sales',
+        )
+        fig_ag.update_traces(texttemplate='%{text:,.0f}', textposition='outside')
+        fig_ag.update_layout(dragmode='pan', 
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            height=max(260, 50 * min(len(df), 10) + 60),
+            margin=dict(t=20, b=20), yaxis=dict(autorange="reversed"), showlegend=False,
+        )
+        st.markdown("#### Sales by Aggregator")
+        st.plotly_chart(fig_ag, use_container_width=True, config={'scrollZoom': False, 'displayModeBar': 'hover'})
 
     render_dim_tab(df_agg, 'Aggregator', compare_on, 'agg', extra_charts_fn=_agg_charts)
 
 # ── Brands tab
 with tab_brands:
     st.markdown("### 🏷️ Brand Performance")
-    df_brand = build_dim_comparison(o_cur, o_old, 'Brand', compare_on, scaffold=_sc_brand)
-    # ── % contribution to total sales ──────────────────────────────────────
-    _brand_total = df_brand['Sales'].sum()
-    df_brand.insert(
-        df_brand.columns.get_loc('Sales') + 1,
-        'Share %',
-        (df_brand['Sales'] / _brand_total * 100).round(1) if _brand_total > 0 else 0.0,
-    )
-    # ── Per-brand Completed / Cancelled (from status-unfiltered slice) ──────
-    _br_comp = (o_cur_fr[o_cur_fr['Status'] == 'Completed']
-                .groupby('Brand').size().rename('Completed'))
-    _br_canc = (o_cur_fr[o_cur_fr['Status'].isin(REJECTED_STATUSES)]
-                .groupby('Brand').size().rename('Cancelled'))
-    df_brand = df_brand.join(_br_comp, on='Brand').join(_br_canc, on='Brand')
-    df_brand['Completed'] = df_brand['Completed'].fillna(0).astype(int)
-    df_brand['Cancelled'] = df_brand['Cancelled'].fillna(0).astype(int)
+    df_brand = build_dim_comparison(o_cur, o_old, 'Brand', compare_on)
 
     def _brand_charts(df):
         if df.empty:
             return
-        _bc1, _bc2 = st.columns(2)
-        with _bc1:
-            fig_br = px.bar(
-                df.head(10), x='Sales', y='Brand', orientation='h',
-                color_discrete_sequence=[ct['tertiary']], template="plotly_dark", text='Sales',
-            )
-            fig_br.update_traces(texttemplate='%{text:,.0f}', textposition='outside')
-            fig_br.update_layout(dragmode='pan',
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                height=max(260, 50 * min(len(df), 10) + 60),
-                margin=dict(t=30, b=20), yaxis=dict(autorange="reversed"), showlegend=False,
-                title=dict(text="Sales by Brand", font=dict(size=13)),
-            )
-            st.plotly_chart(fig_br, use_container_width=True, config={'scrollZoom': False, 'displayModeBar': 'hover'})
-        with _bc2:
-            fig_pie = px.pie(
-                df, values='Sales', names='Brand',
-                color_discrete_sequence=ct['pal'], template="plotly_dark", hole=0.45,
-            )
-            fig_pie.update_traces(
-                textinfo='label+percent',
-                hovertemplate="<b>%{label}</b><br>Sales: %{value:,.0f} SAR<br>Share: %{percent}<extra></extra>",
-            )
-            fig_pie.update_layout(dragmode='pan',
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                height=max(260, 50 * min(len(df), 10) + 60),
-                margin=dict(t=30, b=20), showlegend=True,
-                title=dict(text="Sales Contribution by Brand", font=dict(size=13)),
-            )
-            st.plotly_chart(fig_pie, use_container_width=True, config={'scrollZoom': False, 'displayModeBar': 'hover'})
+        fig_br = px.bar(
+            df.head(10), x='Sales', y='Brand', orientation='h',
+            color_discrete_sequence=[ct['tertiary']], template="plotly_dark", text='Sales',
+        )
+        fig_br.update_traces(texttemplate='%{text:,.0f}', textposition='outside')
+        fig_br.update_layout(dragmode='pan', 
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            height=max(260, 50 * min(len(df), 10) + 60),
+            margin=dict(t=20, b=20), yaxis=dict(autorange="reversed"), showlegend=False,
+        )
+        st.markdown("#### Sales by Brand")
+        st.plotly_chart(fig_br, use_container_width=True, config={'scrollZoom': False, 'displayModeBar': 'hover'})
 
     render_dim_tab(df_brand, 'Brand', compare_on, 'brand', extra_charts_fn=_brand_charts)
 
 # ── Technologies tab
 with tab_tech:
     st.markdown("### ⚙️ Technology / Channel Performance")
-    df_tech = build_dim_comparison(o_cur, o_old, 'Technology', compare_on, scaffold=_sc_tech)
-    # ── Per-technology Completed / Cancelled (from status-unfiltered slice) ─
-    _tc_comp = (o_cur_fr[o_cur_fr['Status'] == 'Completed']
-                .groupby('Technology').size().rename('Completed'))
-    _tc_canc = (o_cur_fr[o_cur_fr['Status'].isin(REJECTED_STATUSES)]
-                .groupby('Technology').size().rename('Cancelled'))
-    df_tech = df_tech.join(_tc_comp, on='Technology').join(_tc_canc, on='Technology')
-    df_tech['Completed'] = df_tech['Completed'].fillna(0).astype(int)
-    df_tech['Cancelled'] = df_tech['Cancelled'].fillna(0).astype(int)
+    df_tech = build_dim_comparison(o_cur, o_old, 'Technology', compare_on)
 
     def _tech_charts(df):
         if df.empty:
@@ -2279,21 +1907,17 @@ with tab_time:
         _hfr_tot  = _t_fr.groupby('Hour').size().reset_index(name='Total')
         _hfr_canc = (_t_fr[_t_fr['Status'].isin(REJECTED_STATUSES)]
                      .groupby('Hour').size().reset_index(name='Cancelled'))
-        _hfr_inp  = (_t_fr[_t_fr['Status'].isin(IN_PROGRESS_STATUSES)]
-                     .groupby('Hour').size().reset_index(name='InProgress'))
-        hourly_fr = _hfr_tot.merge(_hfr_canc, on='Hour', how='left').merge(_hfr_inp, on='Hour', how='left')
-        for _c in ['Total', 'Cancelled', 'InProgress']:
+        hourly_fr = _hfr_tot.merge(_hfr_canc, on='Hour', how='left')
+        for _c in ['Total', 'Cancelled']:
             hourly_fr[_c] = pd.to_numeric(hourly_fr[_c], errors='coerce').fillna(0)
         hourly_fr = _all_hours.merge(hourly_fr, on='Hour', how='left').fillna(0)
-        # Resolved = Completed + Cancelled (exclude In Progress) — matches Summary Fail Rate.
-        _h_resolved = (hourly_fr['Total'] - hourly_fr['InProgress'])
         hourly_fr['Cancel Rate %'] = (
-            hourly_fr['Cancelled'] / _h_resolved.where(_h_resolved > 0) * 100
+            hourly_fr['Cancelled'] / hourly_fr['Total'].where(hourly_fr['Total'] > 0) * 100
         ).fillna(0)
         hourly_fr['Hour_Label'] = hourly_fr['Hour'].apply(lambda h: f"{int(h):02d}:00")
 
         avg_cr = (hourly_fr['Cancelled'].sum() /
-                  max(_h_resolved.sum(), 1) * 100)
+                  max(hourly_fr['Total'].sum(), 1) * 100)
 
         fig_cr = go.Figure()
         fig_cr.add_hline(y=avg_cr, line_dash='dot', line_color=GRAY,
@@ -2331,19 +1955,15 @@ with tab_time:
         _slot_tot  = _t_fr.groupby('Slot').size().reset_index(name='Total_FR')
         _slot_canc = (_t_fr[_t_fr['Status'].isin(REJECTED_STATUSES)]
                       .groupby('Slot').size().reset_index(name='Cancelled_FR'))
-        _slot_inp  = (_t_fr[_t_fr['Status'].isin(IN_PROGRESS_STATUSES)]
-                      .groupby('Slot').size().reset_index(name='InProgress_FR'))
-        slot_fr = _slot_tot.merge(_slot_canc, on='Slot', how='left').merge(_slot_inp, on='Slot', how='left')
-        for _c in ['Total_FR', 'Cancelled_FR', 'InProgress_FR']:
+        slot_fr = _slot_tot.merge(_slot_canc, on='Slot', how='left')
+        for _c in ['Total_FR', 'Cancelled_FR']:
             slot_fr[_c] = pd.to_numeric(slot_fr[_c], errors='coerce').fillna(0)
         slot_df = slot_sales.merge(slot_fr, on='Slot', how='left')
         slot_df['AOV'] = (slot_df['Revenue'] /
                           slot_df['Orders'].where(slot_df['Orders'] > 0)).round(0)
-        # Resolved = Completed + Cancelled (exclude In Progress) — matches Summary Fail Rate.
-        _slot_resolved = (slot_df['Total_FR'] - slot_df['InProgress_FR'])
         slot_df['Cancel Rate %'] = (
             slot_df['Cancelled_FR'] /
-            _slot_resolved.where(_slot_resolved > 0) * 100
+            slot_df['Total_FR'].where(slot_df['Total_FR'] > 0) * 100
         ).round(1).fillna(0)
         slot_df['Revenue Share %'] = (
             slot_df['Revenue'] / slot_df['Revenue'].sum() * 100
@@ -2862,16 +2482,16 @@ with tab_branch_drill:
         _db_comp = (_db_fr['Status'] == 'Completed').sum()
         _db_inp  = _db_fr['Status'].isin(IN_PROGRESS_STATUSES).sum()
         _db_rej  = _db_fr['Status'].isin(REJECTED_STATUSES).sum()
-        _db_fr_sum = _db_comp + _db_rej
-        _db_fill   = (_db_comp / _db_fr_sum * 100) if _db_fr_sum > 0 else 0.0
+        _db_fr_d = (_db_comp + _db_rej) or 1
+        _db_fill = _db_comp / _db_fr_d * 100
         _db_aov  = _db_rev / _db_ords if _db_ords > 0 else 0.0
 
         _db_rev_old  = _db_old['Sales'].sum()
         _db_ords_old = len(_db_old)
         _db_comp_old = (_db_old_fr['Status'] == 'Completed').sum() if not _db_old_fr.empty else 0
         _db_rej_old  = _db_old_fr['Status'].isin(REJECTED_STATUSES).sum() if not _db_old_fr.empty else 0
-        _db_fr_sum_old = _db_comp_old + _db_rej_old
-        _db_fill_old   = (_db_comp_old / _db_fr_sum_old * 100) if _db_fr_sum_old > 0 else 0.0
+        _db_fr_d_old = (_db_comp_old + _db_rej_old) or 1
+        _db_fill_old = _db_comp_old / _db_fr_d_old * 100
 
         kd = st.columns(5)
         if compare_on:
@@ -3024,462 +2644,3 @@ with tab_branch_drill:
                 "Date":     st.column_config.DateColumn("Date",             format="YYYY-MM-DD"),
             },
         )
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 💬 ASK AI ANALYST TAB
-# Conversational RAG console powered by Groq (free, works worldwide).
-# Context is rebuilt from the live filtered dataframes on every message so the
-# model always reasons over the exact data slice the user is currently viewing.
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_ai:
-    st.markdown("### 💬 Ask AI Analyst")
-    st.caption(
-        "Chat with your **live filtered data** using Groq AI. "
-        "Every answer is grounded in the exact data slice you are currently viewing — "
-        "switch filters on any tab and come back here to ask questions about the updated numbers."
-    )
-
-    # ── Resolve API key: secrets file takes priority over manual input ────────
-    # If GROQ_API_KEY is set in .streamlit/secrets.toml (or Streamlit Cloud
-    # secrets), it is used silently for every visitor — no input field shown.
-    # Only when the key is absent from secrets does the manual input field appear.
-    try:
-        _secrets_ai_key = st.secrets.get("GROQ_API_KEY", None)
-    except Exception:
-        _secrets_ai_key = None
-
-    if _secrets_ai_key:
-        ai_key = _secrets_ai_key          # pre-configured: invisible to visitors
-    else:
-        ai_key = st.text_input(
-            "🔑 Groq API Key",
-            type="password",
-            placeholder="Paste your free key from console.groq.com …",
-            key="groq_api_key_input",
-            help="Used only for this browser session. Never stored or sent anywhere except Groq's API.",
-        )
-        if not ai_key:
-            st.info(
-                "**Get a free Groq API key in under a minute:**\n\n"
-                "1. Go to **[console.groq.com](https://console.groq.com)** and sign up free.\n"
-                "2. Click **API Keys → Create API Key** and copy it.\n"
-                "3. Paste it above — or add `GROQ_API_KEY = \"...\"` to `.streamlit/secrets.toml` "
-                "to enable it for all users automatically.\n\n"
-                "Groq is completely free, works worldwide, and is faster than Gemini."
-            )
-    if ai_key:
-        # ── Session state ─────────────────────────────────────────────────────
-        # Each history item: {role, content, result(optional), code(optional)}.
-        if "chat_history" not in st.session_state:
-            st.session_state.chat_history = []
-
-        # ══════════════════════════════════════════════════════════════════════
-        # TOOL-CALLING ANALYST ENGINE
-        # The model never "guesses" numbers. For any analytical question it calls
-        # the `run_pandas` tool with code that computes the answer against the live
-        # filtered frames (o_cur = orders, i_cur = items). We execute that code in
-        # a locked-down sandbox, feed the EXACT result back to the model, and it
-        # writes the final natural-language answer. Temperature is 0.0 throughout.
-        # ══════════════════════════════════════════════════════════════════════
-        import ast, json, numbers
-
-        # ---- (1) SANDBOX: safe execution of model-generated pandas code --------
-        # Tiny builtins whitelist — no open / eval / exec / __import__ / getattr.
-        _SAFE_BUILTINS = {
-            "len": len, "sum": sum, "min": min, "max": max, "abs": abs,
-            "round": round, "sorted": sorted, "list": list, "dict": dict,
-            "set": set, "tuple": tuple, "range": range, "enumerate": enumerate,
-            "zip": zip, "map": map, "filter": filter, "float": float, "int": int,
-            "str": str, "bool": bool, "any": any, "all": all, "print": print,
-            "True": True, "False": False, "None": None,
-        }
-        # Names the generated code may never reference.
-        _BLOCKED_NAMES = {
-            "eval", "exec", "compile", "open", "__import__", "input", "globals",
-            "locals", "vars", "getattr", "setattr", "delattr", "hasattr", "exit",
-            "quit", "help", "breakpoint", "memoryview", "object", "type", "super",
-            "classmethod", "staticmethod", "property", "os", "sys", "subprocess",
-            "shutil", "socket", "importlib", "builtins", "__builtins__",
-        }
-
-        def _validate_ai_code(code):
-            """AST whitelist. Blocks imports, while-loops (DoS), private/dunder
-            attribute access (the classic sandbox-escape vector) and dangerous
-            names. Returns (ok, reason)."""
-            try:
-                _tree = ast.parse(code, mode="exec")
-            except SyntaxError as _e:
-                return False, f"syntax error: {_e}"
-            for _node in ast.walk(_tree):
-                if isinstance(_node, (ast.Import, ast.ImportFrom)):
-                    return False, "imports are not allowed"
-                if isinstance(_node, ast.While):
-                    return False, "while-loops are not allowed"
-                if isinstance(_node, ast.Attribute) and _node.attr.startswith("_"):
-                    return False, "private/dunder attribute access is not allowed"
-                if isinstance(_node, ast.Name) and _node.id in _BLOCKED_NAMES:
-                    return False, f"use of '{_node.id}' is not allowed"
-            return True, ""
-
-        def _run_ai_code(code):
-            """Run validated code in a locked namespace. Code must assign its
-            answer to `result`. Every dataframe is injected as a COPY — the live
-            dataframes can never be mutated by generated code."""
-            _ok, _why = _validate_ai_code(code)
-            if not _ok:
-                raise ValueError(_why)
-            _sandbox = {
-                "__builtins__": _SAFE_BUILTINS,
-                "pd": pd,
-                "o_cur": o_cur.copy(),            # current-period orders (respects all filters incl. Status)
-                "i_cur": i_cur.copy(),            # current-period items
-                "o_cur_fr": o_cur_fr.copy(),      # current-period orders IGNORING the Status filter
-                "o_old": o_old.copy(),            # previous-period orders (empty if compare off)
-                "i_old": i_old.copy(),            # previous-period items   (empty if compare off)
-                "o_old_fr": o_old_fr.copy(),      # previous-period orders ignoring the Status filter
-                "compare_on": bool(compare_on),   # True when period comparison is active
-                "result": None,
-            }
-            exec(compile(code, "<ai_analyst>", "exec"), _sandbox)
-            return _sandbox.get("result", None)
-
-        # ---- (2) TOOL DEFINITION (OpenAI / Groq function-calling schema) -------
-        _AI_TOOLS = [{
-            "type": "function",
-            "function": {
-                "name": "run_pandas",
-                "description": (
-                    "Compute an EXACT answer by running pandas code against the live, "
-                    "already-filtered dataframes. Use for ANY question needing a number, "
-                    "total, average, rate, ranking, breakdown or comparison. Never "
-                    "estimate — always compute here."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "explanation": {
-                            "type": "string",
-                            "description": "One short, friendly sentence telling the user what you are about to calculate.",
-                        },
-                        "code": {
-                            "type": "string",
-                            "description": (
-                                "Python pandas code. Available variables: `o_cur` (current orders, "
-                                "respects all filters), `i_cur` (current items), `o_cur_fr` (current "
-                                "orders IGNORING the Status filter — use for Fill/Cancel rates), "
-                                "`o_old`/`i_old` (previous-period orders/items), `o_old_fr` (previous "
-                                "orders ignoring Status filter), `compare_on` (bool) and `pd`. For "
-                                "period-over-period / growth questions use o_old (check compare_on "
-                                "first). Assign the final answer to `result` (a number, a pandas "
-                                "Series, or a DataFrame). No imports, no file/network/OS access, no "
-                                "while-loops."
-                            ),
-                        },
-                    },
-                    "required": ["explanation", "code"],
-                },
-            },
-        }]
-
-        # ---- (3) RESULT HELPERS: serialise for the model, render for the user --
-        def _serialize_for_model(result, max_rows=40):
-            if result is None:
-                return "result is None — the code did not assign `result`."
-            if isinstance(result, (pd.DataFrame, pd.Series)):
-                return result.head(max_rows).to_string()
-            return str(result)
-
-        def _render_result(result):
-            """Show the computed value with native, theme-aware widgets
-            (st.metric for a single number, st.dataframe for a breakdown)."""
-            if result is None:
-                return
-            if isinstance(result, pd.DataFrame):
-                st.dataframe(result, use_container_width=True,
-                             height=min(420, 70 + 35 * min(len(result), 12)))
-            elif isinstance(result, pd.Series):
-                st.dataframe(result.rename("Value").to_frame(),
-                             use_container_width=True,
-                             height=min(420, 70 + 35 * min(len(result), 12)))
-            elif isinstance(result, numbers.Number) and not isinstance(result, bool):
-                _v = float(result)
-                _disp = f"{int(_v):,}" if _v == int(_v) else f"{_v:,.2f}"
-                st.metric("Result", _disp)
-            elif isinstance(result, dict):
-                st.json(result)
-            else:
-                st.write(result)
-
-        # ---- (4) SYSTEM PROMPT: schema-grounded, computation-first -------------
-        def _build_system_prompt():
-            def _schema(df, name):
-                _cols = "\n".join(f"    - {c}  ({df[c].dtype})" for c in df.columns)
-                return f"  {name} — {len(df):,} rows:\n{_cols}"
-            def _cats(df, cols, cap=15):
-                _out = []
-                for c in cols:
-                    if c in df.columns:
-                        _vals = [str(v) for v in df[c].dropna().unique().tolist()[:cap]]
-                        if _vals:
-                            _out.append(f"    {c}: {', '.join(_vals)}")
-                return "\n".join(_out)
-            _o_schema = _schema(o_cur, "o_cur (current-period orders)")
-            _i_schema = (_schema(i_cur, "i_cur (current-period items)") if not i_cur.empty
-                         else "  i_cur (current-period items): (empty under the current filter)")
-            def _filter_summary():
-                _parts = [f"Date range: {sd} to {ed}"]
-                for _lbl, _act, _key in [("Brands", active_brands, "Brand"),
-                                          ("Branches", active_locs, "Location"),
-                                          ("Providers", active_provs, "Provider"),
-                                          ("Technologies", active_techs, "Technology"),
-                                          ("Statuses", active_status, "Status")]:
-                    _all = ALL_OPTS.get(_key, [])
-                    if _act and len(_act) < len(_all):
-                        _shown = ", ".join(map(str, list(_act)[:8]))
-                        _parts.append(f"{_lbl}: {_shown}" + (" (+more)" if len(_act) > 8 else ""))
-                    else:
-                        _parts.append(f"{_lbl}: all")
-                return "\n  ".join(_parts)
-            _cat_vals = _cats(o_cur, ["Brand", "Location", "Provider", "Technology", "Status"])
-            return f"""You are a senior business-intelligence consultant for Alnumuw, a Saudi multi-brand restaurant group. You answer with EXACT, computed figures — never estimates or guesses.
-
-You have one tool: `run_pandas`. For ANY question that needs a number, total, average, rate, ranking, breakdown or comparison, you MUST call `run_pandas` with code that computes it and assigns the answer to `result`. Never do arithmetic yourself.
-
-CURRENT VIEW — the user is looking at exactly this slice; everything you compute is within it:
-  {_filter_summary()}
-
-DATAFRAMES available to your code (o_cur / i_cur are already filtered to the user's current view):
-{_o_schema}
-{_i_schema}
-  o_cur_fr — current-period orders IGNORING any Status filter; rows: {len(o_cur_fr):,}. USE THIS for Fill Rate / Cancel Rate so they match the dashboard tiles.
-  o_old (previous-period orders) — same columns as o_cur; rows: {len(o_old):,}
-  i_old (previous-period items)  — same columns as i_cur; rows: {len(i_old):,}
-  o_old_fr — previous-period orders ignoring the Status filter; rows: {len(o_old_fr):,}
-
-PERIOD COMPARISON:
-  compare_on is currently {compare_on}.
-  - When compare_on is True, o_old / i_old hold the PREVIOUS period. Use them for any
-    "vs previous", "growth", "change" or period-over-period question — e.g.
-    growth_pct = (o_cur['Sales'].sum() - o_old['Sales'].sum()) / o_old['Sales'].sum() * 100
-  - When compare_on is False, o_old / i_old are EMPTY. If the user asks for a comparison,
-    set result to a short string telling them to turn on "Compare to previous period" in the sidebar.
-
-KEY CATEGORICAL VALUES (use exact spelling when filtering):
-{_cat_vals}
-
-DIMENSION DEFINITIONS — never confuse these:
-  BRAND = restaurant concept     -> column 'Brand'
-  BRANCH = physical location     -> column 'Location'
-  PROVIDER = delivery aggregator -> column 'Provider'
-  TECHNOLOGY = POS system        -> column 'Technology'
-
-STATUS GROUPS (filter exactly like this):
-  Cancelled   : o_cur['Status'].isin({sorted(REJECTED_STATUSES)})
-  In Progress : o_cur['Status'].isin({sorted(IN_PROGRESS_STATUSES)})
-  Completed   : o_cur['Status'] == 'Completed'
-
-METRIC DEFINITIONS (compute EXACTLY like the dashboard):
-  Revenue       = o_cur['Sales'].sum()
-  AOV           = o_cur['Sales'].sum() / len(o_cur)
-  Fill Rate %   = completed / (completed + cancelled) * 100   (use o_cur_fr; exclude In Progress)
-  Cancel/Fail % = cancelled / (completed + cancelled) * 100   (use o_cur_fr; exclude In Progress)
-  Item revenue  = i_cur['Total Amount'] ;  Item quantity = i_cur['Quantity']
-
-WORKED EXAMPLES (follow these patterns):
-  # Cancellation rate by brand (rates use o_cur_fr and exclude In Progress)
-  d = o_cur_fr[o_cur_fr['Status'] != 'In Progress']
-  g = d.groupby('Brand')['Status'].apply(lambda s: s.isin({sorted(REJECTED_STATUSES)}).sum() / len(s) * 100)
-  result = g.sort_values(ascending=False).round(1)
-  # Revenue by aggregator, ranked
-  result = o_cur.groupby('Provider')['Sales'].sum().sort_values(ascending=False).round(0)
-  # Revenue growth vs previous period
-  result = round((o_cur['Sales'].sum() - o_old['Sales'].sum()) / o_old['Sales'].sum() * 100, 1)
-
-HOW TO ANSWER:
-1. Briefly acknowledge the request in natural language (the `explanation` field), e.g. "Let me calculate that revenue breakdown for you."
-2. Call run_pandas ONCE with correct code that sets `result`. Call it a second time ONLY if the first code raised an error.
-3. As soon as you have the result, STOP calling the tool and write your final answer (under ~200 words, markdown): state the EXACT numbers, then ONE sharp, SPECIFIC insight grounded in the data — name the outlier, quantify the gap vs the group average, or flag a concrete risk. Avoid generic filler like "consider optimising this". Use a markdown table or bullets for 3+ items. Be warm and consultative — a real analyst, not a terminal.
-
-CURRENCY & NUMBERS: All money is in SAR (Saudi Riyals). Always write amounts as "SAR 1,234" (never "$"), using thousands separators and at most 2 decimals.
-
-CONVERSATION: If the user simply greets you, thanks you, or asks what you can do, reply briefly and warmly in plain language WITHOUT calling the tool — then invite them to ask a question about their data. Use run_pandas only when the question actually needs real numbers."""
-
-        # A click on an example chip queues that question for this run.
-        _pending_q = st.session_state.pop("_ai_pending_q", None)
-
-        # ── Declare the message container BEFORE chat_input so all messages
-        #    (history + new) render above the input box, not below it. ──────────
-        _chat_container = st.container()
-
-        # ── Chat input pinned below the message area ───────────────────────────
-        _user_input = st.chat_input(
-            "Ask anything about your data — e.g. 'Which brand had the highest cancellation rate?'"
-        ) or _pending_q
-
-        # Everything below renders inside the container (above the input). ──────
-        with _chat_container:
-            # ── Friendly empty state ───────────────────────────────────────────
-            if not st.session_state.chat_history and not _user_input:
-                with st.chat_message("assistant"):
-                    st.markdown(
-                        "👋 **Hi! I'm your Alnumuw data analyst.** Ask me anything about the data "
-                        "you're currently viewing — totals, rankings, fill/cancel rates, top items, "
-                        "day-of-week or hourly patterns, or period-over-period comparisons — and I'll "
-                        "compute the exact numbers for you.\n\nTry one of these to get started:"
-                    )
-                    _examples = [
-                        "What's my total revenue and order count?",
-                        "Which brand has the highest cancellation rate?",
-                        "Show me revenue by aggregator.",
-                        "What are my top 5 menu items by revenue?",
-                    ]
-                    _ex_cols = st.columns(2)
-                    for _ei, _ex in enumerate(_examples):
-                        if _ex_cols[_ei % 2].button(_ex, key=f"ai_ex_{_ei}", use_container_width=True):
-                            st.session_state["_ai_pending_q"] = _ex
-                            st.rerun()
-
-            # ── Replay prior turns ─────────────────────────────────────────────
-            for _msg in st.session_state.chat_history:
-                with st.chat_message(_msg["role"]):
-                    if _msg.get("content"):
-                        st.markdown(_msg["content"])
-
-        if _user_input:
-            # ── Per-session rate limit (protects the shared Groq quota) ────────
-            import time as _time
-            _now = _time.time()
-            _RATE_WIN, _RATE_MAX = 60, 12
-            st.session_state.setdefault("ai_call_times", [])
-            st.session_state.ai_call_times = [
-                _t for _t in st.session_state.ai_call_times if _now - _t < _RATE_WIN
-            ]
-            if len(st.session_state.ai_call_times) >= _RATE_MAX:
-                _wait = max(1, int(_RATE_WIN - (_now - st.session_state.ai_call_times[0])))
-                with st.chat_message("user"):
-                    st.markdown(_user_input)
-                with st.chat_message("assistant"):
-                    st.markdown(
-                        f"⏳ You're asking questions very quickly. Please wait about "
-                        f"**{_wait} seconds** and try again — this limit protects the shared "
-                        f"AI quota so it stays available for everyone."
-                    )
-                st.stop()
-            st.session_state.ai_call_times.append(_now)
-
-            # Show the user's bubble + record it — inside the container so it
-            # appears above the chat_input, not below it.
-            with _chat_container:
-                with st.chat_message("user"):
-                    st.markdown(_user_input)
-            st.session_state.chat_history.append({"role": "user", "content": _user_input})
-
-            # ── Assistant turn: the tool-calling loop ─────────────────────────
-            with _chat_container:
-             with st.chat_message("assistant"):
-                _final_text = ""
-                _did_compute = False
-                _shown_expl = False
-
-                def _stream_text(_resp):
-                    # Yield text deltas from a Groq streaming response for st.write_stream.
-                    for _chunk in _resp:
-                        try:
-                            _piece = _chunk.choices[0].delta.content or ""
-                        except (IndexError, AttributeError):
-                            _piece = ""
-                        if _piece:
-                            yield _piece
-
-                try:
-                    from groq import Groq as _Groq
-                    _client = _Groq(api_key=ai_key)
-
-                    # Messages: system + prior text turns + the new question.
-                    _messages = [{"role": "system", "content": _build_system_prompt()}]
-                    for _m in st.session_state.chat_history[:-1]:
-                        if _m.get("role") in ("user", "assistant") and _m.get("content"):
-                            _messages.append({"role": _m["role"], "content": _m["content"]})
-                    _messages.append({"role": "user", "content": _user_input})
-
-                    # ── Phase 1: computation rounds (non-streaming, tools on) ──
-                    # We compute once; the loop only repeats to let the model
-                    # self-correct if its generated code raised an error.
-                    for _round in range(3):
-                        with st.spinner("Analysing your data …"):
-                            _resp = _client.chat.completions.create(
-                                model="llama-3.3-70b-versatile",
-                                messages=_messages, tools=_AI_TOOLS,
-                                tool_choice="auto", temperature=0.0, max_tokens=1500,
-                            )
-                        _rmsg = _resp.choices[0].message
-                        _calls = _rmsg.tool_calls or []
-                        if not _calls:
-                            _final_text = _rmsg.content or ""   # direct reply (greeting / no compute)
-                            break
-                        # Echo the assistant's tool-call turn back into the thread.
-                        _messages.append({
-                            "role": "assistant", "content": _rmsg.content or "",
-                            "tool_calls": [
-                                {"id": _tc.id, "type": "function",
-                                 "function": {"name": _tc.function.name,
-                                              "arguments": _tc.function.arguments}}
-                                for _tc in _calls],
-                        })
-                        # ---- LOCAL CODE EXECUTION happens here ----------------
-                        _had_error = False
-                        for _tc in _calls:
-                            try:
-                                _args = json.loads(_tc.function.arguments or "{}")
-                            except Exception:
-                                _args = {}
-                            _expl = (_args.get("explanation") or "").strip()
-                            _code = _args.get("code") or ""
-                            if _expl and not _shown_expl:        # acknowledge ONCE
-                                st.markdown(f"_{_expl}_")
-                                _shown_expl = True
-                            try:
-                                _payload = _serialize_for_model(_run_ai_code(_code))
-                            except Exception as _ce:
-                                _payload = f"ERROR running code: {_ce}"
-                                _had_error = True
-                            _messages.append({
-                                "role": "tool", "tool_call_id": _tc.id,
-                                "name": "run_pandas", "content": _payload,
-                            })
-                        _did_compute = True
-                        if not _had_error:
-                            break                                # computed cleanly -> write answer
-
-                    # ── Phase 2: stream the final written answer (tool-free) ───
-                    if _did_compute:
-                        _answer_stream = _client.chat.completions.create(
-                            model="llama-3.3-70b-versatile",
-                            messages=_messages + [{
-                                "role": "user",
-                                "content": ("Using the computed results above, write the final answer "
-                                            "for the user now in natural language. Do NOT call any tool."),
-                            }],
-                            temperature=0.0, max_tokens=1500, stream=True,
-                        )
-                        _final_text = st.write_stream(_stream_text(_answer_stream))
-                    else:
-                        if not _final_text:
-                            _final_text = "I couldn't produce an answer — please try rephrasing your question."
-                        st.markdown(_final_text)
-                except Exception as _err:
-                    _final_text = (f"⚠️ **AI error:**\n\n```\n{_err}\n```\n\n"
-                                   "Check that your Groq API key is valid "
-                                   "([console.groq.com](https://console.groq.com)).")
-                    st.markdown(_final_text)
-
-            # Persist the assistant turn (text only — keeps the history clean).
-            st.session_state.chat_history.append({"role": "assistant", "content": _final_text})
-
-        # ── Clear conversation ─────────────────────────────────────────────────
-        if st.session_state.get("chat_history"):
-            st.markdown("---")
-            if st.button("🗑️ Clear conversation", key="clear_ai_chat"):
-                st.session_state.chat_history = []
-                st.session_state.pop("ai_call_times", None)
-                st.rerun()
