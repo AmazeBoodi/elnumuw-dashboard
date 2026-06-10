@@ -209,13 +209,26 @@ try:
         except Exception:
             drive_file_id = None
         if not drive_file_id:
-            st.error(
-                "⚠️ DRIVE_FILE_ID is not configured in Streamlit secrets. "
-                "Add it under App settings → Secrets, or upload a file manually "
-                "using the sidebar override."
-            )
-            st.stop()
-        file_bytes = _load_from_drive(drive_file_id)
+            # Local fallback: when no Drive ID is configured, look for a local
+            # Excel file instead (path overridable via the ALNUMUW_LOCAL_XLSX
+            # environment variable). Makes local development work without
+            # uploading manually, and lets the automated tests drive the app
+            # with a synthetic dataset.
+            import os as _os
+            _local_xlsx = _os.environ.get("ALNUMUW_LOCAL_XLSX", "Alnumuw-MergedData.xlsx")
+            if _os.path.exists(_local_xlsx):
+                st.caption(f"📁 Using local file (no DRIVE_FILE_ID configured): {_os.path.basename(_local_xlsx)}")
+                with open(_local_xlsx, "rb") as _f:
+                    file_bytes = _f.read()
+            else:
+                st.error(
+                    "⚠️ DRIVE_FILE_ID is not configured in Streamlit secrets, and no local "
+                    "Excel file was found. Add the ID under App settings → Secrets, or upload "
+                    "a file manually using the sidebar override."
+                )
+                st.stop()
+        else:
+            file_bytes = _load_from_drive(drive_file_id)
     df_all_o, df_all_i = process(file_bytes)
 except Exception as e:
     st.error(f"❌ Error loading data: {e}")
@@ -223,6 +236,50 @@ except Exception as e:
 
 G_MIN = df_all_o['Date'].min().date()
 G_MAX = df_all_o['Date'].max().date()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ISLAMIC CALENDAR PERIODS (Ramadan / Eid) — Saudi demand reshapes completely
+# during these windows, so trend charts shade them and month-over-month
+# comparisons that cross them can be read honestly.
+# ══════════════════════════════════════════════════════════════════════════════
+def _islamic_periods(g_min, g_max):
+    """Return [(label, start_ts, end_ts), ...] for Ramadan, Eid al-Fitr and
+    Eid al-Adha across the Hijri years overlapping the data span. Returns []
+    gracefully when the hijridate package is not installed."""
+    try:
+        from hijridate import Hijri, Gregorian
+    except ImportError:
+        try:
+            from hijri_converter import Hijri, Gregorian   # legacy package name
+        except ImportError:
+            return []
+    periods = []
+    try:
+        hy_start = Gregorian(g_min.year, g_min.month, g_min.day).to_hijri().year - 1
+        hy_end   = Gregorian(g_max.year, g_max.month, g_max.day).to_hijri().year + 1
+    except Exception:
+        return []
+    for hy in range(hy_start, hy_end + 1):
+        try:
+            ram_s   = pd.Timestamp(Hijri(hy, 9, 1).to_gregorian())
+            eid_f_s = pd.Timestamp(Hijri(hy, 10, 1).to_gregorian())
+            eid_a_s = pd.Timestamp(Hijri(hy, 12, 10).to_gregorian())
+            periods.append(("🌙 Ramadan",     ram_s,   eid_f_s - pd.Timedelta(days=1)))
+            periods.append(("🎉 Eid al-Fitr", eid_f_s, eid_f_s + pd.Timedelta(days=2)))
+            periods.append(("🐑 Eid al-Adha", eid_a_s, eid_a_s + pd.Timedelta(days=2)))
+        except Exception:
+            continue
+    return periods
+
+ISLAMIC_PERIODS = _islamic_periods(G_MIN, G_MAX)
+
+def _ramadan_mask(date_series):
+    """Boolean mask: which dates fall inside any Ramadan window."""
+    m = pd.Series(False, index=date_series.index)
+    for _lbl, _ps, _pe in ISLAMIC_PERIODS:
+        if 'Ramadan' in _lbl:
+            m |= date_series.between(_ps, _pe)
+    return m
 
 # ── on_click callbacks for reset buttons. Mutating widget state via a callback
 # is the Streamlit-blessed pattern; it runs before the next rerun's widgets
@@ -363,21 +420,45 @@ for _pi, (_plabel, _ps, _pe, _phelp) in enumerate(_presets):
 
 if compare_on:
     n_days = (pd.Timestamp(ed) - pd.Timestamp(sd)).days + 1
-    # The natural comparison window ends the day before the current period starts.
-    _cmp_e_natural = pd.Timestamp(sd) - pd.Timedelta(days=1)
 
-    if _cmp_e_natural < pd.Timestamp(G_MIN):
-        # Current period starts at (or before) the very first date in the dataset
-        # — there is no historical data to compare against.
+    _cc1, _cc2 = st.columns([2, 2])
+    with _cc2:
+        _cmp_basis = st.selectbox(
+            "Comparison basis",
+            ["⏮️ Previous period",
+             "📅 Same period last month",
+             "🗓️ Same period last year (weekday-aligned)"],
+            key="cmp_basis",
+            help=("Previous period = the days immediately before your window. "
+                  "Same period last month/year keeps weekday mix comparable — "
+                  "last year is shifted by exactly 52 weeks so Fridays compare to Fridays."),
+        )
+
+    # Candidate comparison window per basis
+    if "last month" in _cmp_basis:
+        _cand_s = pd.Timestamp(sd) - pd.DateOffset(months=1)
+        _cand_e = pd.Timestamp(ed) - pd.DateOffset(months=1)
+    elif "last year" in _cmp_basis:
+        # 364 days = exactly 52 weeks → weekday-aligned (Friday vs Friday)
+        _cand_s = pd.Timestamp(sd) - pd.Timedelta(days=364)
+        _cand_e = pd.Timestamp(ed) - pd.Timedelta(days=364)
+    else:
+        _cand_e = pd.Timestamp(sd) - pd.Timedelta(days=1)
+        _cand_s = _cand_e - pd.Timedelta(days=n_days - 1)
+
+    # The comparison window may never overlap the current period.
+    _cand_e = min(_cand_e, pd.Timestamp(sd) - pd.Timedelta(days=1))
+
+    if _cand_e < pd.Timestamp(G_MIN) or _cand_s > _cand_e:
+        # No historical data exists for the requested basis.
         st.markdown(
             "<div style='"
             "padding:10px 16px;border-radius:8px;border-left:4px solid #F59E0B;"
             "background:rgba(245,158,11,0.08);font-size:0.875rem;line-height:1.5"
             "'>"
-            "📅 <b>No comparison period available.</b> "
-            "Your current start date is at the beginning of the dataset — "
-            "there is no earlier data to compare against. "
-            "Move the <b>start date</b> forward to create room for a historical window."
+            "📅 <b>No comparison period available for this basis.</b> "
+            "The data does not reach back far enough. "
+            "Try a different comparison basis, or move the <b>start date</b> forward."
             "</div>",
             unsafe_allow_html=True,
         )
@@ -385,10 +466,9 @@ if compare_on:
     else:
         # Clamp both ends to the data bounds so the date picker never receives
         # a value outside [min_value, max_value] — that causes RangeError in JS.
-        cmp_e = _cmp_e_natural
-        cmp_s = max(cmp_e - pd.Timedelta(days=n_days - 1), pd.Timestamp(G_MIN))
+        cmp_e = _cand_e
+        cmp_s = max(_cand_s, pd.Timestamp(G_MIN))
 
-        _cc1, _cc2 = st.columns([2, 2])
         with _cc1:
             # max_value is capped at the day before the current period so the
             # comparison window can never overlap with the current period.
@@ -644,6 +724,46 @@ else:
 
 if status_user_filtered:
     st.caption("* Fill Rate is always calculated using all order statuses — even if you have filtered by status in the sidebar. This is intentional: if we only counted 'Completed' orders, Fill Rate would always show 100%, which would be meaningless.")
+
+# ── Month-end projection (weekday-adjusted run rate) ─────────────────────────
+# Uses the latest calendar month in the data and the current sidebar filters;
+# the date-range window is deliberately ignored so the projection is always
+# about "this month" regardless of what period is being inspected.
+_pm_start = pd.Timestamp(G_MAX).replace(day=1)
+_pm_end   = _pm_start + pd.offsets.MonthEnd(0)
+with st.expander(f"🔮 Month-End Projection — {_pm_start.strftime('%B %Y')}", expanded=False):
+    _proj_o, _ = compile_split_data(_pm_start.date(), G_MAX)
+    if _proj_o.empty:
+        st.info("No orders recorded yet this month under the current filters.")
+    else:
+        _mtd_rev   = _proj_o['Sales'].sum()
+        _mtd_ord   = len(_proj_o)
+        _daily_rev = _proj_o.groupby('Date')['Sales'].sum()
+        _daily_ord = _proj_o.groupby('Date').size()
+        _remaining = pd.date_range(pd.Timestamp(G_MAX) + pd.Timedelta(days=1), _pm_end)
+        # Weekday-adjusted: each remaining day projected from the average of
+        # the SAME weekday so far this month (fallback: overall daily average).
+        _wd_rev = _daily_rev.groupby(_daily_rev.index.day_name()).mean()
+        _wd_ord = _daily_ord.groupby(_daily_ord.index.day_name()).mean()
+        _avg_rev = _daily_rev.mean()
+        _avg_ord = _daily_ord.mean()
+        _proj_rev = _mtd_rev + sum(_wd_rev.get(d.day_name(), _avg_rev) for d in _remaining)
+        _proj_ord = _mtd_ord + sum(_wd_ord.get(d.day_name(), _avg_ord) for d in _remaining)
+        _pj = st.columns(4)
+        _pj[0].metric("💰 MTD Revenue",        f"{_mtd_rev:,.0f}")
+        _pj[1].metric("🔮 Projected Month-End", f"{_proj_rev:,.0f}",
+                      f"{(_proj_rev / _mtd_rev - 1) * 100:+.0f}% still to come" if len(_remaining) and _mtd_rev > 0 else "month complete")
+        _pj[2].metric("📦 MTD Orders",          f"{_mtd_ord:,}")
+        _pj[3].metric("🔮 Projected Orders",    f"{_proj_ord:,.0f}")
+        if len(_remaining):
+            st.caption(
+                f"Projection = month-to-date + weekday-adjusted run rate for the remaining "
+                f"{len(_remaining)} day(s) (each projected from the average of the same weekday "
+                f"so far this month). Respects sidebar filters; ignores the date-range window. "
+                f"Data is current through {pd.Timestamp(G_MAX).strftime('%b %d')}."
+            )
+        else:
+            st.caption("The month is complete — projection equals the actual month-to-date totals.")
 
 if not anomaly_days.empty:
     _an_list = " · ".join(
@@ -1045,7 +1165,7 @@ with tab_summary:
                 name="Orders Count", yaxis="y2", opacity=0.3, marker_color=AMBER
             ))
 
-        fig.update_layout(dragmode='pan', 
+        fig.update_layout(dragmode='pan',
             template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             yaxis=dict(title=dict(text="Revenue (SAR)", font=dict(color=ct['accent'])), tickfont=dict(color=ct['accent'])),
             yaxis2=dict(title=dict(text="Orders Count", font=dict(color=AMBER)), tickfont=dict(color=AMBER), overlaying="y", side="right"),
@@ -1053,7 +1173,24 @@ with tab_summary:
             hovermode="x unified",
             barmode='group' if compare_on else 'overlay'
         )
+        # Shade Ramadan / Eid windows that fall inside the selected range so
+        # demand shifts during those weeks aren't misread as anomalies.
+        _shaded_labels = []
+        for _ip_lbl, _ip_s, _ip_e in ISLAMIC_PERIODS:
+            if _ip_e >= pd.Timestamp(sd) and _ip_s <= pd.Timestamp(ed):
+                fig.add_vrect(
+                    x0=max(_ip_s, pd.Timestamp(sd)), x1=min(_ip_e, pd.Timestamp(ed)),
+                    fillcolor=PURPLE, opacity=0.10, line_width=0,
+                    annotation_text=_ip_lbl, annotation_position="top left",
+                    annotation_font_size=11, annotation_font_color=PURPLE,
+                )
+                _shaded_labels.append(_ip_lbl)
         st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': False, 'displayModeBar': 'hover'})
+        if _shaded_labels:
+            st.caption(
+                "🟣 Shaded areas mark " + " · ".join(dict.fromkeys(_shaded_labels)) +
+                " — demand patterns shift during these periods, so swings inside the shading are usually seasonal, not operational."
+            )
 
         if compare_on:
             st.caption("The dotted amber line shows the previous period. Its dates have been shifted to align with the current period so both lines sit on the same chart and you can compare them side by side. Hover over any point to see the exact values and which period it belongs to.")
@@ -1383,6 +1520,49 @@ with tab_orders:
             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
         )
         st.plotly_chart(fig_aov, use_container_width=True, config={'scrollZoom': False, 'displayModeBar': 'hover'})
+
+        # ── Order value distribution — AOV is an average; this shows the shape ─
+        with st.expander("💵 Order Value Distribution — what does a typical ticket look like?"):
+            _dist_brands = ["All brands"] + sorted(o_cur['Brand'].dropna().unique().tolist())
+            _dist_pick = st.selectbox("Brand", _dist_brands, key="dist_brand")
+            _dist_o = o_cur if _dist_pick == "All brands" else o_cur[o_cur['Brand'] == _dist_pick]
+            if len(_dist_o) >= 20:
+                _cap = _dist_o['Sales'].quantile(0.99)
+                _shown = _dist_o[_dist_o['Sales'] <= _cap]
+                _n_trim = len(_dist_o) - len(_shown)
+                _med = _dist_o['Sales'].median()
+                _avg = _dist_o['Sales'].mean()
+                fig_dist = px.histogram(
+                    _shown, x='Sales', nbins=50, template="plotly_dark",
+                    color_discrete_sequence=[ct['accent']],
+                    labels={'Sales': 'Order value (SAR)'},
+                )
+                fig_dist.add_vline(x=_med, line_dash='dash', line_color=GREEN,
+                                   annotation_text=f"Median {_med:,.0f}",
+                                   annotation_position="top right")
+                fig_dist.add_vline(x=_avg, line_dash='dot', line_color=AMBER,
+                                   annotation_text=f"Average {_avg:,.0f}",
+                                   annotation_position="top left")
+                fig_dist.update_layout(
+                    dragmode='pan', paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    height=300, margin=dict(l=20, r=20, t=30, b=20), showlegend=False,
+                    yaxis=dict(title="Orders"), bargap=0.05,
+                )
+                st.plotly_chart(fig_dist, use_container_width=True,
+                                config={'scrollZoom': False, 'displayModeBar': 'hover'})
+                _gap_note = (
+                    "Average sits well above the median — a minority of large orders is pulling AOV up; "
+                    "most customers spend less than the AOV suggests."
+                    if _avg > _med * 1.15 else
+                    "Average and median are close — order values are fairly uniform."
+                )
+                st.caption(
+                    f"{_gap_note} "
+                    f"{f'Top 1% of orders ({_n_trim:,} above {_cap:,.0f} SAR) trimmed from the chart for readability — they still count in the median/average lines. ' if _n_trim else ''}"
+                    "A minimum-order-value promotion bites just to the right of the tallest bars."
+                )
+            else:
+                st.info("Need at least 20 orders under the current selection to draw a meaningful distribution.")
 
         # ── Raw table ────────────────────────────────────────────────────────
         # ── DAILY SUMMARY TABLE ──────────────────────────────────────────────
@@ -2052,6 +2232,38 @@ with tab_items:
                     f"Both weeks are anchored to the END of your selected date range ({_rf_end.strftime('%b %d')}). "
                     f"Items below 100 SAR in both weeks are hidden to reduce noise.{_extra_new}"
                 )
+
+        # ── 4) Basket analysis — items frequently ordered together ──────────
+        with st.expander("🧺 Frequently Bought Together — combo & bundle opportunities"):
+            _bk = i_cur[i_cur['Items'] != UNMATCHED_ITEM_LABEL][['Order ID', 'Items']].dropna().drop_duplicates()
+            _bk_counts = _bk['Order ID'].value_counts()
+            _multi_ids = _bk_counts[_bk_counts >= 2].index
+            _n_multi   = len(_multi_ids)
+            if _n_multi < 10:
+                st.info("Fewer than 10 multi-item orders under the current filters — not enough to find reliable pairings.")
+            else:
+                _bk2 = _bk[_bk['Order ID'].isin(_multi_ids)]
+                _pairs = _bk2.merge(_bk2, on='Order ID')
+                _pairs = _pairs[_pairs['Items_x'] < _pairs['Items_y']]
+                _pc = (_pairs.groupby(['Items_x', 'Items_y']).size()
+                       .rename('Orders Together').reset_index()
+                       .sort_values('Orders Together', ascending=False).head(15)
+                       .rename(columns={'Items_x': 'Item A', 'Items_y': 'Item B'}))
+                _pc['% of Multi-Item Orders'] = (_pc['Orders Together'] / _n_multi * 100)
+                st.markdown(
+                    f"Out of **{_n_multi:,} orders containing 2+ different items**, these pairs "
+                    "appear together most often — natural candidates for combo meals and aggregator bundles:"
+                )
+                st.dataframe(
+                    _pc.style.format({'Orders Together': '{:,}',
+                                      '% of Multi-Item Orders': '{:.1f}%'}, na_rep='—'),
+                    use_container_width=True, hide_index=True,
+                    height=min(420, 60 + 35 * len(_pc)),
+                )
+                st.caption(
+                    "Pairs count each order once regardless of quantities. "
+                    "A pair appearing in 5%+ of multi-item orders is a strong combo candidate."
+                )
     else:
         st.info("No item data found for current filters.")
 
@@ -2393,6 +2605,57 @@ with tab_branches:
                 },
             )
             st.caption("'Days Silent' counts from each branch's last order to the most recent date in the dataset. Date-range filters do not affect this table; dimension filters (brand, city, aggregator…) do.")
+
+        # ── Branch consistency: volatility of daily sales ───────────────────
+        with st.expander("📊 Branch Consistency — who is steady, who swings?"):
+            _vol_pivot = (o_cur.pivot_table(index='Date', columns='Location',
+                                            values='Sales', aggfunc='sum')
+                          .reindex(pd.date_range(pd.Timestamp(sd), pd.Timestamp(ed)))
+                          .fillna(0))
+            _vol = pd.DataFrame({
+                'Avg Daily Sales': _vol_pivot.mean(),
+                'Std Dev':         _vol_pivot.std(),
+                'Active Days':     (_vol_pivot > 0).sum(),
+            })
+            _vol['CV %'] = (_vol['Std Dev'] /
+                            _vol['Avg Daily Sales'].where(_vol['Avg Daily Sales'] > 0) * 100)
+            _vol = _vol[_vol['Active Days'] >= 7]          # need a week of activity to score
+            if _vol.empty:
+                st.info("No branch has 7+ active days in the selected range — pick a longer window.")
+            else:
+                def _vol_band(cv):
+                    if pd.isna(cv):  return '—'
+                    if cv < 50:      return '🟢 Steady'
+                    if cv < 100:     return '🟡 Variable'
+                    return '🔴 Erratic'
+                _vol['Consistency'] = _vol['CV %'].apply(_vol_band)
+                _vol = (_vol.reset_index().rename(columns={'Location': 'Branch'})
+                        .sort_values('CV %', ascending=False).reset_index(drop=True))
+                _n_err = int((_vol['CV %'] >= 100).sum())
+                if _n_err:
+                    st.markdown(
+                        f"**{_n_err} of {len(_vol)} scored branches are erratic** — daily sales swing "
+                        "more than their own average. For small branches this is often just low volume "
+                        "(many zero-sales days); for high-revenue branches near the top of this table "
+                        "it usually means inconsistent opening hours, staffing gaps, or an aggregator "
+                        "listing going on/off — those are the ones worth investigating."
+                    )
+                st.dataframe(
+                    _vol.style.format({'Avg Daily Sales': '{:,.0f}', 'Std Dev': '{:,.0f}',
+                                       'CV %': '{:.0f}%', 'Active Days': '{:,}'}, na_rep='—'),
+                    use_container_width=True, hide_index=True,
+                    height=min(500, 60 + 35 * len(_vol)),
+                    column_config={
+                        'Avg Daily Sales': st.column_config.TextColumn('Avg Daily Sales (SAR)'),
+                        'Std Dev':         st.column_config.TextColumn('Std Dev (SAR)'),
+                        'CV %':            st.column_config.TextColumn('Volatility (CV)'),
+                    },
+                )
+                st.caption(
+                    "CV (coefficient of variation) = standard deviation ÷ average of daily sales over the "
+                    "selected range; days with zero sales count toward volatility. Two branches with identical "
+                    "monthly totals can behave very differently — the erratic one deserves a closer look."
+                )
     else:
         st.info("No branch data found for current filters.")
 
@@ -2453,6 +2716,46 @@ with tab_aggs:
             st.plotly_chart(fig_pie, use_container_width=True, config={'scrollZoom': False, 'displayModeBar': 'hover'})
 
     render_dim_tab(df_agg, 'Aggregator', compare_on, 'agg', extra_charts_fn=_agg_charts)
+
+    # ── Dependency risk: branches relying heavily on a single aggregator ─────
+    if not o_cur.empty:
+        with st.expander("⚠️ Dependency Risk — branches relying on one aggregator"):
+            _dr = o_cur.groupby(['Location', 'Provider'])['Sales'].sum().reset_index()
+            _dr_tot = _dr.groupby('Location')['Sales'].sum().rename('Branch Revenue').reset_index()
+            _dr_top = (_dr.sort_values('Sales', ascending=False)
+                       .drop_duplicates('Location')
+                       .rename(columns={'Provider': 'Top Aggregator', 'Sales': 'Via Top Agg'}))
+            _dr_top = _dr_top.merge(_dr_tot, on='Location')
+            _dr_top['Share %'] = (_dr_top['Via Top Agg'] /
+                                  _dr_top['Branch Revenue'].where(_dr_top['Branch Revenue'] > 0) * 100)
+            def _dr_risk(s):
+                if pd.isna(s):  return '—'
+                if s >= 80:     return '🔴 High'
+                if s >= 60:     return '🟡 Medium'
+                return '🟢 Diversified'
+            _dr_top['Risk'] = _dr_top['Share %'].apply(_dr_risk)
+            _dr_top = (_dr_top.rename(columns={'Location': 'Branch'})
+                       [['Branch', 'Top Aggregator', 'Via Top Agg', 'Branch Revenue', 'Share %', 'Risk']]
+                       .sort_values('Share %', ascending=False).reset_index(drop=True))
+            _n_high = int((_dr_top['Share %'] >= 80).sum())
+            st.markdown(
+                f"**{_n_high} branch(es) take 80%+ of their revenue through a single aggregator** — "
+                "one delisting or commission change away from losing most of their business."
+                if _n_high else
+                "✅ No branch takes 80%+ of its revenue from a single aggregator under the current filters."
+            )
+            st.dataframe(
+                _dr_top.style.format({'Via Top Agg': '{:,.0f}',
+                                      'Branch Revenue': '{:,.0f}',
+                                      'Share %': '{:.1f}%'}, na_rep='—'),
+                use_container_width=True, hide_index=True,
+                height=min(500, 60 + 35 * len(_dr_top)),
+                column_config={
+                    'Via Top Agg':    st.column_config.TextColumn('Via Top Agg (SAR)'),
+                    'Branch Revenue': st.column_config.TextColumn('Branch Revenue (SAR)'),
+                },
+            )
+            st.caption("🔴 80%+ through one provider · 🟡 60–79% · 🟢 below 60%. Branches with very few orders naturally skew concentrated — check revenue before acting.")
 
 # ── Brands tab
 with tab_brands:
@@ -2841,6 +3144,53 @@ with tab_time:
                 },
             )
         st.caption("🌅 Breakfast 06–10  ·  🍽️ Lunch 11–14  ·  ☕ Afternoon 15–17  ·  🍜 Dinner 18–22  ·  🌙 Late Night 23–05")
+
+        # ── Ramadan vs regular days: hourly demand profile ───────────────────
+        # Only shown when the selected range contains BOTH Ramadan and
+        # non-Ramadan days, so the two profiles are actually comparable.
+        if ISLAMIC_PERIODS:
+            _t_ram = _ramadan_mask(_t_cur['Date'])
+            if _t_ram.any() and (~_t_ram).any():
+                with st.expander("🌙 Ramadan vs Regular Days — hourly demand profile"):
+                    _ram_days  = _t_cur.loc[_t_ram, 'Date'].nunique()
+                    _reg_days  = _t_cur.loc[~_t_ram, 'Date'].nunique()
+                    _ram_h = (_t_cur[_t_ram].groupby('Hour').size() / max(_ram_days, 1))
+                    _reg_h = (_t_cur[~_t_ram].groupby('Hour').size() / max(_reg_days, 1))
+                    _hh = pd.DataFrame({'Hour': range(24)})
+                    _hh['Ramadan']  = _hh['Hour'].map(_ram_h).fillna(0)
+                    _hh['Regular']  = _hh['Hour'].map(_reg_h).fillna(0)
+                    _hh['Label']    = _hh['Hour'].apply(lambda h: f"{int(h):02d}:00")
+                    fig_ram = go.Figure()
+                    fig_ram.add_trace(go.Scatter(
+                        x=_hh['Label'], y=_hh['Regular'], name=f"Regular days ({_reg_days})",
+                        mode='lines', line=dict(color=ct['accent'], width=2),
+                        fill='tozeroy', fillcolor='rgba(59,130,246,0.10)',
+                        hovertemplate="<b>%{x}</b><br>Regular: %{y:,.1f} orders/day<extra></extra>",
+                    ))
+                    fig_ram.add_trace(go.Scatter(
+                        x=_hh['Label'], y=_hh['Ramadan'], name=f"Ramadan days ({_ram_days})",
+                        mode='lines', line=dict(color=PURPLE, width=2),
+                        fill='tozeroy', fillcolor='rgba(139,92,246,0.15)',
+                        hovertemplate="<b>%{x}</b><br>Ramadan: %{y:,.1f} orders/day<extra></extra>",
+                    ))
+                    fig_ram.update_layout(
+                        dragmode='pan',
+                        template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                        height=320, margin=dict(l=20, r=20, t=20, b=20), hovermode='x unified',
+                        yaxis=dict(title="Avg orders per day"),
+                        xaxis=dict(tickangle=-45),
+                        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+                    )
+                    st.plotly_chart(fig_ram, use_container_width=True,
+                                    config={'scrollZoom': False, 'displayModeBar': 'hover'})
+                    _ram_peak = _hh.loc[_hh['Ramadan'].idxmax()]
+                    _reg_peak = _hh.loc[_hh['Regular'].idxmax()]
+                    st.caption(
+                        f"Both lines are normalised to orders **per day**, so different day counts compare fairly. "
+                        f"Ramadan peak: **{_ram_peak['Label']}** ({_ram_peak['Ramadan']:,.0f} orders/day) vs regular peak: "
+                        f"**{_reg_peak['Label']}** ({_reg_peak['Regular']:,.0f} orders/day). Use this to plan Ramadan "
+                        "staffing and aggregator promotions around iftar and suhoor instead of regular meal times."
+                    )
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 📅 MONTHLY TRENDS TAB
