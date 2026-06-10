@@ -228,7 +228,7 @@ G_MAX = df_all_o['Date'].max().date()
 # is the Streamlit-blessed pattern; it runs before the next rerun's widgets
 # are instantiated, which is the only reliable way to truly reset a widget
 # that has already been rendered in this session.
-_FILTER_KEYS = ["v_Brand", "v_Provider", "v_Location", "v_Technology", "v_Status", "v_Items", "v_City"]
+_FILTER_KEYS = ["v_Brand", "v_Provider", "v_Location", "v_Technology", "v_Status", "v_Items", "v_City", "v_Weekday"]
 
 def _cb_clear_filters():
     # Explicitly set each multiselect's value to an empty list. This is more
@@ -236,6 +236,8 @@ def _cb_clear_filters():
     # at widget instantiation; SETTING the key guarantees the new state.
     for _k in _FILTER_KEYS:
         st.session_state[_k] = []
+    # Hour slider resets to the full 0–23 range, not an empty list.
+    st.session_state["v_Hours"] = (0, 23)
 
 def _cb_reset_date():
     # Explicitly set the date_input back to the full data window. pop() does
@@ -333,6 +335,31 @@ with _c3:
         on_click=_cb_reset_date,
         key="reset_date_btn",
     )
+
+# ── Quick date presets ─────────────────────────────────────────────────────
+# Anchored to the LATEST date in the data (G_MAX), not today's calendar date,
+# so "Last 7 Days" still works when the data upload lags by a day or two.
+def _cb_set_range(s, e):
+    s, e = max(s, G_MIN), min(e, G_MAX)
+    if s > e:                      # preset lies entirely outside the data window
+        s, e = G_MIN, G_MAX
+    st.session_state["date_range_key"] = (s, e)
+
+_anchor = pd.Timestamp(G_MAX)
+_this_month_start  = _anchor.replace(day=1).date()
+_last_month_end    = (_anchor.replace(day=1) - pd.Timedelta(days=1))
+_last_month_start  = _last_month_end.replace(day=1).date()
+_presets = [
+    ("7D",          (_anchor - pd.Timedelta(days=6)).date(),  G_MAX, "Last 7 days of data"),
+    ("30D",         (_anchor - pd.Timedelta(days=29)).date(), G_MAX, "Last 30 days of data"),
+    ("This Month",  _this_month_start,                        G_MAX, f"{_anchor.strftime('%B %Y')} to date"),
+    ("Last Month",  _last_month_start,    _last_month_end.date(),    _last_month_end.strftime('%B %Y')),
+    ("All",         G_MIN,                                    G_MAX, "Entire data history"),
+]
+_pc = st.columns(len(_presets) + 3)   # +3 empty columns keep buttons compact
+for _pi, (_plabel, _ps, _pe, _phelp) in enumerate(_presets):
+    _pc[_pi].button(_plabel, key=f"preset_{_pi}", use_container_width=True,
+                    help=_phelp, on_click=_cb_set_range, args=(_ps, _pe))
 
 if compare_on:
     n_days = (pd.Timestamp(ed) - pd.Timestamp(sd)).days + 1
@@ -447,6 +474,18 @@ with st.sidebar:
                 "If you select only specific products, these orders will be excluded from all results."
             )
 
+    _WEEKDAY_ORDER = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+    _time_active = (_count_active("v_Weekday") > 0 or
+                    st.session_state.get("v_Hours", (0, 23)) != (0, 23))
+    _time_label = "🕐 Filter by Time" + ("  ·  active" if _time_active else "")
+    with st.expander(_time_label, expanded=_time_active):
+        sel_weekdays = st.multiselect("Weekday", options=_WEEKDAY_ORDER,
+                                      key="v_Weekday", label_visibility="visible")
+        sel_hours = st.slider("Hour of day", 0, 23, (0, 23), key="v_Hours",
+                              help="Restrict the whole dashboard to orders placed within this hour window")
+        if sel_hours != (0, 23):
+            st.caption("⚠️ Orders with no recorded time are excluded while an hour filter is active.")
+
     st.markdown("---")
     with st.expander("🎨 Chart Colours", expanded=False):
         theme_name = st.radio(
@@ -491,6 +530,12 @@ def compile_split_data(start_d, end_d, ignore_status=False):
     ]
     ids = master_map[master_map['Items'].isin(active_items)]['Order ID'].unique()
     o_df = o_df[o_df['Order ID'].isin(ids)]
+    # Time filters (weekday / hour-of-day). Items inherit them automatically
+    # via the Order ID restriction below.
+    if sel_weekdays:
+        o_df = o_df[o_df['Date'].dt.day_name().isin(sel_weekdays)]
+    if sel_hours != (0, 23) and 'Hour' in o_df.columns:
+        o_df = o_df[(o_df['Hour'] >= sel_hours[0]) & (o_df['Hour'] <= sel_hours[1])]
     i_df = df_all_i[df_all_i['Order ID'].isin(o_df['Order ID']) & df_all_i['Items'].isin(active_items)]
     return o_df, i_df
 
@@ -510,6 +555,23 @@ _fr_base = o_cur_fr[~o_cur_fr['Status'].isin(IN_PROGRESS_STATUSES)]
 fr_total = len(_fr_base)
 fr_rej   = len(_fr_base[_fr_base['Status'].isin(REJECTED_STATUSES)])
 fill_cur = ((fr_total - fr_rej) / fr_total * 100) if fr_total > 0 else 100.0
+
+# ── Fill-rate anomaly detection ────────────────────────────────────────────
+# A day is anomalous when its fill rate drops more than 5 pp below its own
+# trailing 7-day average. Computed once here; the Summary tab shows a warning
+# banner and the Orders tab marks the days on the fill-rate chart.
+_an_daily = (_fr_base.groupby('Date')
+             .agg(_Resolved=('Order ID', 'count'),
+                  _Rej=('Status', lambda s: s.isin(REJECTED_STATUSES).sum()))
+             .reset_index().sort_values('Date'))
+if not _an_daily.empty:
+    _an_daily['FillRate'] = ((_an_daily['_Resolved'] - _an_daily['_Rej']) /
+                             _an_daily['_Resolved'].where(_an_daily['_Resolved'] > 0) * 100)
+    _an_roll = _an_daily['FillRate'].rolling(7, min_periods=3).mean()
+    _an_daily['IsAnomaly'] = _an_daily['FillRate'] < (_an_roll - 5)
+    anomaly_days = _an_daily[_an_daily['IsAnomaly']][['Date', 'FillRate']]
+else:
+    anomaly_days = pd.DataFrame(columns=['Date', 'FillRate'])
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PREVIOUS PERIOD COMPUTATION (always defined so tabs can reference safely)
@@ -582,6 +644,23 @@ else:
 
 if status_user_filtered:
     st.caption("* Fill Rate is always calculated using all order statuses — even if you have filtered by status in the sidebar. This is intentional: if we only counted 'Completed' orders, Fill Rate would always show 100%, which would be meaningless.")
+
+if not anomaly_days.empty:
+    _an_list = " · ".join(
+        f"{_r['Date'].strftime('%b %d')} ({_r['FillRate']:.1f}%)"
+        for _, _r in anomaly_days.tail(8).iterrows()
+    )
+    st.markdown(
+        "<div style='padding:10px 16px;border-radius:8px;border-left:4px solid #EF4444;"
+        "background:rgba(239,68,68,0.07);font-size:0.875rem;line-height:1.6'>"
+        f"⚠️ <b>{len(anomaly_days)} day(s) with unusual fill-rate drops</b> "
+        "(more than 5 pp below their trailing 7-day average): "
+        f"{_html.escape(_an_list)}"
+        f"{' · …' if len(anomaly_days) > 8 else ''} — "
+        "see the red markers on the Orders tab fill-rate chart."
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 # ══════════════════════════════════════════════════════════════════════════════
 # COMPARISON TABLE HELPERS
@@ -921,7 +1000,7 @@ _sc_city     = set(_hist_o['City'].dropna().unique()) if 'City' in _hist_o.colum
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("<br>", unsafe_allow_html=True)
 tab_summary, tab_orders, tab_lost, tab_items, tab_branches, tab_aggs, tab_brands, tab_tech, tab_time, tab_monthly, tab_matrix, tab_branch_drill, tab_ai = st.tabs(
-    ["📊 Summary", "📦 Orders", "🚫 Lost Orders", "🛒 Items", "📍 Branches", "🚚 Aggregators", "🏷️ Brands", "⚙️ Technologies", "⏰ Time Analysis", "📅 Monthly Trends", "🔀 Brand × Aggregator", "🔍 Branch Drill-Down", "💬 Ask AI Analyst"]
+    ["📊 Summary", "📦 Orders", "🚫 Lost Orders", "🛒 Items", "📍 Branches", "🚚 Aggregators", "🏷️ Brands", "⚙️ Technologies", "⏰ Time Analysis", "📅 Monthly Trends", "🔀 Cross-Matrix", "🔍 Branch Drill-Down", "💬 Ask AI Analyst"]
 )
 
 # ── Summary timeline with current vs previous overlay
@@ -1188,6 +1267,13 @@ with tab_orders:
             fill='tozeroy', fillcolor='rgba(245,158,11,0.12)',
             hovertemplate="<b>%{x|%b %d}</b><br>Fill Rate: %{y:.1f}%<extra></extra>",
         ))
+        if not anomaly_days.empty:
+            fig_fr.add_trace(go.Scatter(
+                x=anomaly_days['Date'], y=anomaly_days['FillRate'],
+                mode='markers', name="Unusual drop",
+                marker=dict(color=RED, size=10, symbol='x'),
+                hovertemplate="<b>%{x|%b %d}</b><br>⚠️ Unusual drop: %{y:.1f}%<extra></extra>",
+            ))
         fig_fr.update_layout(dragmode='pan', 
             template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             height=220, margin=dict(l=10, r=10, t=10, b=10),
@@ -1501,6 +1587,57 @@ with tab_lost:
         st.markdown("#### Daily Cancellation Trend")
         st.plotly_chart(fig_l, use_container_width=True, config={'scrollZoom': False, 'displayModeBar': 'hover'})
 
+        # ── Root-cause matrix: cancel rate per Aggregator × Hour ────────────
+        # Finds patterns a single-dimension table hides, e.g. one aggregator
+        # failing specifically during the dinner peak.
+        if 'Hour' in o_cur_fr.columns and o_cur_fr['Hour'].notna().any():
+            st.markdown("#### 🔥 Cancel Rate by Aggregator × Hour")
+            _rc = o_cur_fr[~o_cur_fr['Status'].isin(IN_PROGRESS_STATUSES)].copy()
+            _rc = _rc[_rc['Hour'].notna()]
+            _rc['Hour'] = _rc['Hour'].astype(int)
+            _rc_tot  = _rc.groupby(['Provider', 'Hour']).size().rename('Total')
+            _rc_canc = (_rc[_rc['Status'].isin(REJECTED_STATUSES)]
+                        .groupby(['Provider', 'Hour']).size().rename('Cancelled'))
+            _rc_df = pd.concat([_rc_tot, _rc_canc], axis=1).fillna(0).reset_index()
+            _rc_df['Rate'] = _rc_df['Cancelled'] / _rc_df['Total'].where(_rc_df['Total'] > 0) * 100
+            _rc_rate = (_rc_df.pivot(index='Provider', columns='Hour', values='Rate')
+                        .reindex(columns=range(24)))
+            _rc_n    = (_rc_df.pivot(index='Provider', columns='Hour', values='Total')
+                        .reindex(columns=range(24)).fillna(0))
+            # Order rows by overall cancel rate (worst first). agg-based (not
+            # groupby.apply) — apply crashes on empty input and is deprecated
+            # for this pattern in pandas 2.x.
+            _rc_sums  = _rc_df.groupby('Provider')[['Cancelled', 'Total']].sum()
+            _rc_order = ((_rc_sums['Cancelled'] / _rc_sums['Total'].clip(lower=1) * 100)
+                         .sort_values(ascending=False).index.tolist())
+            _rc_rate = _rc_rate.reindex(_rc_order)
+            _rc_n    = _rc_n.reindex(_rc_order)
+            fig_rc = go.Figure(go.Heatmap(
+                z=_rc_rate.values,
+                x=[f"{h:02d}:00" for h in range(24)],
+                y=list(_rc_rate.index),
+                colorscale='Reds', zmin=0,
+                customdata=_rc_n.values,
+                hovertemplate=("<b>%{y}  %{x}</b><br>Cancel Rate: %{z:.1f}%<br>"
+                               "Resolved orders: %{customdata:,.0f}<extra></extra>"),
+                hoverongaps=False, showscale=True,
+            ))
+            fig_rc.update_layout(
+                dragmode='pan',
+                template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                height=max(280, 40 * len(_rc_rate) + 120),
+                margin=dict(l=10, r=10, t=10, b=50),
+                xaxis=dict(title="Hour of Day", tickangle=-45),
+                yaxis=dict(title=""),
+            )
+            st.plotly_chart(fig_rc, use_container_width=True,
+                            config={'scrollZoom': False, 'displayModeBar': 'hover'})
+            st.caption(
+                "Darker red = a higher share of that aggregator's orders were cancelled at that hour. "
+                "Aggregators are sorted worst-first. Blank cells = no resolved orders at that hour. "
+                "⚠️ Hover to check the order count — a 100% rate on 2 orders matters less than 30% on 200."
+            )
+
         # Helper to build a "lost orders by dimension" breakdown — compact:
         # Cancelled Orders + Lost Revenue + Rate%, plus one Growth % column.
         def build_lost_breakdown(cur_lost, old_lost, fr_cur, fr_old, dim, with_compare):
@@ -1779,6 +1916,142 @@ with tab_items:
                     "Qty":   st.column_config.TextColumn("Quantity"),
                 },
             )
+
+        # ══════════════════════════════════════════════════════════════════
+        # ADVANCED ITEM ANALYTICS
+        # ══════════════════════════════════════════════════════════════════
+        st.markdown("---")
+
+        # ── 1) Pareto (80/20) ───────────────────────────────────────────────
+        with st.expander("📐 Pareto Analysis — which items drive 80% of revenue?"):
+            _par = cur_items.sort_values('Sales', ascending=False).reset_index(drop=True)
+            _par_tot = _par['Sales'].sum()
+            if _par_tot > 0 and len(_par) > 1:
+                _par['Cum %'] = (_par['Sales'].cumsum() / _par_tot * 100)
+                _n80 = min(int((_par['Cum %'] < 80).sum()) + 1, len(_par))
+                st.markdown(
+                    f"**🎯 The top {_n80} of {len(_par)} items generate ~80% of item revenue** "
+                    f"— that's {_n80 / len(_par) * 100:.0f}% of the menu doing most of the work."
+                )
+                _par['Rank'] = range(1, len(_par) + 1)
+                fig_par = go.Figure()
+                fig_par.add_trace(go.Bar(
+                    x=_par['Rank'], y=_par['Sales'], name="Sales",
+                    marker_color=ct['accent'], opacity=0.7,
+                    customdata=_par[['Item']].values,
+                    hovertemplate="<b>#%{x}  %{customdata[0]}</b><br>Sales: %{y:,.0f} SAR<extra></extra>",
+                ))
+                fig_par.add_trace(go.Scatter(
+                    x=_par['Rank'], y=_par['Cum %'], name="Cumulative %",
+                    yaxis='y2', line=dict(color=AMBER, width=2),
+                    hovertemplate="Cumulative: %{y:.1f}%<extra></extra>",
+                ))
+                fig_par.add_vline(x=_n80, line_dash='dot', line_color=GRAY,
+                                  annotation_text=f"80% at item #{_n80}",
+                                  annotation_position="top right")
+                fig_par.update_layout(
+                    dragmode='pan',
+                    template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    height=320, margin=dict(l=20, r=20, t=20, b=20), hovermode='x unified',
+                    xaxis=dict(title="Items ranked by sales"),
+                    yaxis=dict(title="Sales (SAR)"),
+                    yaxis2=dict(title="Cumulative %", overlaying='y', side='right',
+                                range=[0, 105], ticksuffix='%'),
+                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+                )
+                st.plotly_chart(fig_par, use_container_width=True,
+                                config={'scrollZoom': False, 'displayModeBar': 'hover'})
+            else:
+                st.info("Not enough item data for a Pareto analysis under the current filters.")
+
+        # ── 2) Menu Engineering quadrant ────────────────────────────────────
+        with st.expander("🍽️ Menu Engineering — Stars, Workhorses, Puzzles & Dogs"):
+            _me = cur_items[(cur_items['Qty'] > 0) & (cur_items['Sales'] > 0)].copy()
+            if len(_me) >= 4:
+                _me['Unit Price'] = _me['Sales'] / _me['Qty']
+                _q_med = _me['Qty'].median()
+                _p_med = _me['Unit Price'].median()
+                def _quad(r):
+                    hi_pop, hi_pr = r['Qty'] >= _q_med, r['Unit Price'] >= _p_med
+                    if hi_pop and hi_pr:  return '⭐ Star'
+                    if hi_pop:            return '🐴 Workhorse'
+                    if hi_pr:             return '🧩 Puzzle'
+                    return '🐶 Dog'
+                _me['Quadrant'] = _me.apply(_quad, axis=1)
+                fig_me = px.scatter(
+                    _me, x='Qty', y='Unit Price', color='Quadrant', size='Sales',
+                    hover_name='Item', log_x=True, template="plotly_dark",
+                    color_discrete_map={'⭐ Star': GREEN, '🐴 Workhorse': BLUE,
+                                        '🧩 Puzzle': AMBER, '🐶 Dog': RED},
+                    labels={'Qty': 'Quantity sold (log scale)', 'Unit Price': 'Revenue per unit (SAR)'},
+                )
+                fig_me.add_vline(x=_q_med, line_dash='dot', line_color=GRAY)
+                fig_me.add_hline(y=_p_med, line_dash='dot', line_color=GRAY)
+                fig_me.update_layout(
+                    dragmode='pan', paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    height=420, margin=dict(l=20, r=20, t=20, b=20),
+                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+                )
+                st.plotly_chart(fig_me, use_container_width=True,
+                                config={'scrollZoom': False, 'displayModeBar': 'hover'})
+                _qc = _me['Quadrant'].value_counts()
+                st.markdown(
+                    f"**⭐ Stars ({_qc.get('⭐ Star', 0)})** — popular AND high-value: protect and promote these. &nbsp; "
+                    f"**🐴 Workhorses ({_qc.get('🐴 Workhorse', 0)})** — popular but low-value: bundle or upsell. &nbsp; "
+                    f"**🧩 Puzzles ({_qc.get('🧩 Puzzle', 0)})** — high-value but rarely ordered: need marketing or repositioning. &nbsp; "
+                    f"**🐶 Dogs ({_qc.get('🐶 Dog', 0)})** — low on both: candidates to remove from the menu."
+                )
+                st.caption("Quadrant lines sit at the median quantity and median revenue-per-unit. Bubble size = total sales. Note: without cost data this uses revenue-per-unit as the value measure, not true profit margin.")
+            else:
+                st.info("Need at least 4 items with sales to build the quadrant.")
+
+        # ── 3) Rising & Falling items (last 7 days vs the 7 before) ─────────
+        with st.expander("📊 Rising & Falling Items — last 7 days vs the 7 days before"):
+            _rf_end   = pd.Timestamp(ed)
+            _rf_mid   = _rf_end - pd.Timedelta(days=7)    # boundary between the two weeks
+            _rf_start = _rf_end - pd.Timedelta(days=13)
+            if _rf_start < pd.Timestamp(G_MIN):
+                st.info("Needs at least 14 days of data history before the end of the selected range.")
+            else:
+                _, _i_recent = compile_split_data(_rf_start.date(), _rf_end.date())
+                _rf_cur  = _i_recent[_i_recent['Date'] >  _rf_mid]
+                _rf_prev = _i_recent[_i_recent['Date'] <= _rf_mid]
+                _cw = _rf_cur.groupby('Items')['Total Amount'].sum().rename('Last 7d')
+                _pw = _rf_prev.groupby('Items')['Total Amount'].sum().rename('Prev 7d')
+                _rf = (pd.concat([_cw, _pw], axis=1).fillna(0).reset_index()
+                       .rename(columns={'Items': 'Item'}))
+                # Noise floor: ignore items doing < 100 SAR in both weeks
+                _rf = _rf[_rf[['Last 7d', 'Prev 7d']].max(axis=1) >= 100]
+                _rf['Change %'] = ((_rf['Last 7d'] - _rf['Prev 7d']) /
+                                   _rf['Prev 7d'].where(_rf['Prev 7d'] > 0)) * 100
+                _risers  = (_rf[(_rf['Prev 7d'] > 0) & (_rf['Change %'] > 0)]
+                            .sort_values('Change %', ascending=False).head(10))
+                _fallers = (_rf[(_rf['Prev 7d'] > 0) & (_rf['Change %'] < 0)]
+                            .sort_values('Change %').head(10))
+                _new_cnt = int(((_rf['Prev 7d'] == 0) & (_rf['Last 7d'] > 0)).sum())
+                _rfc1, _rfc2 = st.columns(2)
+                _rf_fmt = {'Last 7d': '{:,.0f}', 'Prev 7d': '{:,.0f}', 'Change %': '{:+.1f}%'}
+                with _rfc1:
+                    st.markdown("##### 📈 Top Risers")
+                    if _risers.empty:
+                        st.caption("No rising items above the 100 SAR/week noise floor.")
+                    else:
+                        st.dataframe(_risers.style.format(_rf_fmt, na_rep='—'),
+                                     use_container_width=True, hide_index=True,
+                                     height=min(420, 60 + 35 * len(_risers)))
+                with _rfc2:
+                    st.markdown("##### 📉 Top Fallers")
+                    if _fallers.empty:
+                        st.caption("No falling items above the 100 SAR/week noise floor.")
+                    else:
+                        st.dataframe(_fallers.style.format(_rf_fmt, na_rep='—'),
+                                     use_container_width=True, hide_index=True,
+                                     height=min(420, 60 + 35 * len(_fallers)))
+                _extra_new = f" · {_new_cnt} item(s) sold in the last 7 days with zero sales the week before." if _new_cnt else ""
+                st.caption(
+                    f"Both weeks are anchored to the END of your selected date range ({_rf_end.strftime('%b %d')}). "
+                    f"Items below 100 SAR in both weeks are hidden to reduce noise.{_extra_new}"
+                )
     else:
         st.info("No item data found for current filters.")
 
@@ -1872,8 +2145,11 @@ with tab_branches:
             old_b['_PrevCompleted'] = (old_b['_PrevTotalFR'] - old_b['_PrevRejected'] - old_b['_PrevInProgress']).clip(lower=0)
             _denom_old_sum = old_b['_PrevCompleted'] + old_b['_PrevRejected']
             _denom_old = _denom_old_sum.where(_denom_old_sum > 0)
-            old_b['_PrevFillRate']  = (old_b['_PrevCompleted'] / _denom_old * 100).fillna(100)
-            old_b['_PrevFailRate']  = (old_b['_PrevRejected'] / _denom_old * 100).fillna(0)
+            # No fillna here — a branch with zero resolved orders last period has
+            # no meaningful previous rate; NaN propagates so the table shows "—"
+            # instead of a fake "was 100%" / "was 0%".
+            old_b['_PrevFillRate']  = (old_b['_PrevCompleted'] / _denom_old * 100)
+            old_b['_PrevFailRate']  = (old_b['_PrevRejected'] / _denom_old * 100)
             old_b['_PrevAOV']       = (old_b['_PrevSales'] /
                                        old_b['_PrevOrders'].where(old_b['_PrevOrders'] > 0))
 
@@ -1881,9 +2157,13 @@ with tab_branches:
                                               '_PrevCompleted','_PrevRejected',
                                               '_PrevFillRate','_PrevFailRate','_PrevAOV']],
                                       on='Branch', how='left')
-            for c in ['_PrevSales','_PrevOrders','_PrevCompleted','_PrevRejected',
-                       '_PrevFillRate','_PrevFailRate','_PrevAOV']:
+            for c in ['_PrevSales','_PrevOrders','_PrevCompleted','_PrevRejected']:
                 branches[c] = pd.to_numeric(branches[c], errors='coerce').fillna(0)
+            # Rates and AOV keep NaN when the branch has no prior data — that
+            # makes 'vs Prev' render as no-arrow instead of a misleading
+            # "+95.0 pp · was 0.0%" for branches that are simply new.
+            for c in ['_PrevFillRate','_PrevFailRate','_PrevAOV']:
+                branches[c] = pd.to_numeric(branches[c], errors='coerce')
 
             def _pct_diff(cur, prev): return ((cur - prev) / prev.where(prev > 0)) * 100
             branches['Sales vs Prev %']     = _pct_diff(branches['Current Sales'], branches['_PrevSales'])
@@ -2033,6 +2313,86 @@ with tab_branches:
                          },
                          height=min(700, 60 + 35 * len(branches)))
         st.caption("🟢 The top 10 branches by Sales are highlighted in green — your best performers this period. 🔴 The bottom 10 are highlighted in red — these may need attention. Use the Sort controls above to re-order the table by any column.")
+
+        st.markdown("---")
+
+        # ── Pareto: which branches drive 80% of revenue? ────────────────────
+        with st.expander("📐 Pareto Analysis — which branches drive 80% of revenue?"):
+            _bpar = (branches[['Branch', 'Current Sales']]
+                     .sort_values('Current Sales', ascending=False).reset_index(drop=True))
+            _bpar_tot = _bpar['Current Sales'].sum()
+            if _bpar_tot > 0 and len(_bpar) > 1:
+                _bpar['Cum %'] = _bpar['Current Sales'].cumsum() / _bpar_tot * 100
+                _bn80 = min(int((_bpar['Cum %'] < 80).sum()) + 1, len(_bpar))
+                st.markdown(
+                    f"**🎯 The top {_bn80} of {len(_bpar)} branches generate ~80% of revenue** "
+                    f"({_bn80 / len(_bpar) * 100:.0f}% of the network)."
+                )
+                _bpar['Rank'] = range(1, len(_bpar) + 1)
+                fig_bpar = go.Figure()
+                fig_bpar.add_trace(go.Bar(
+                    x=_bpar['Rank'], y=_bpar['Current Sales'], name="Sales",
+                    marker_color=ct['secondary'], opacity=0.7,
+                    customdata=_bpar[['Branch']].values,
+                    hovertemplate="<b>#%{x}  %{customdata[0]}</b><br>Sales: %{y:,.0f} SAR<extra></extra>",
+                ))
+                fig_bpar.add_trace(go.Scatter(
+                    x=_bpar['Rank'], y=_bpar['Cum %'], name="Cumulative %",
+                    yaxis='y2', line=dict(color=AMBER, width=2),
+                    hovertemplate="Cumulative: %{y:.1f}%<extra></extra>",
+                ))
+                fig_bpar.add_vline(x=_bn80, line_dash='dot', line_color=GRAY,
+                                   annotation_text=f"80% at branch #{_bn80}",
+                                   annotation_position="top right")
+                fig_bpar.update_layout(
+                    dragmode='pan',
+                    template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    height=320, margin=dict(l=20, r=20, t=20, b=20), hovermode='x unified',
+                    xaxis=dict(title="Branches ranked by sales"),
+                    yaxis=dict(title="Sales (SAR)"),
+                    yaxis2=dict(title="Cumulative %", overlaying='y', side='right',
+                                range=[0, 105], ticksuffix='%'),
+                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+                )
+                st.plotly_chart(fig_bpar, use_container_width=True,
+                                config={'scrollZoom': False, 'displayModeBar': 'hover'})
+            else:
+                st.info("Not enough branch data for a Pareto analysis under the current filters.")
+
+        # ── Branch lifecycle / health tracker ───────────────────────────────
+        with st.expander("🏥 Branch Lifecycle — first/last order & silent branches"):
+            # Uses the full-history slice (_hist_o) so 'Last Order' reflects all
+            # data under the current dimension filters, not just the date window.
+            _lc = (_hist_o.groupby('Location')
+                   .agg(**{'First Order': ('Date', 'min'),
+                           'Last Order':  ('Date', 'max'),
+                           'Lifetime Orders': ('Order ID', 'count')})
+                   .reset_index().rename(columns={'Location': 'Branch'}))
+            _lc['Days Silent'] = (pd.Timestamp(G_MAX) - _lc['Last Order']).dt.days
+            def _lc_status(d):
+                if d <= 3:   return '🟢 Active'
+                if d <= 13:  return '🟡 Quiet'
+                return '🔴 Silent 14+ days'
+            _lc['Health'] = _lc['Days Silent'].apply(_lc_status)
+            _lc = _lc.sort_values(['Days Silent', 'Lifetime Orders'],
+                                  ascending=[False, False]).reset_index(drop=True)
+            _n_silent = int((_lc['Days Silent'] >= 14).sum())
+            if _n_silent:
+                st.markdown(
+                    f"⚠️ **{_n_silent} branch(es) have been silent for 14+ days** (vs the latest "
+                    f"date in the data, {pd.Timestamp(G_MAX).strftime('%b %d, %Y')}) — possible "
+                    "closures, aggregator delistings, or POS integration breakages."
+                )
+            st.dataframe(
+                _lc.style.format({'Lifetime Orders': '{:,}', 'Days Silent': '{:,}'}, na_rep='—'),
+                use_container_width=True, hide_index=True,
+                height=min(500, 60 + 35 * len(_lc)),
+                column_config={
+                    'First Order': st.column_config.DateColumn('First Order', format="MMM DD, YYYY"),
+                    'Last Order':  st.column_config.DateColumn('Last Order',  format="MMM DD, YYYY"),
+                },
+            )
+            st.caption("'Days Silent' counts from each branch's last order to the most recent date in the dataset. Date-range filters do not affect this table; dimension filters (brand, city, aggregator…) do.")
     else:
         st.info("No branch data found for current filters.")
 
@@ -2416,16 +2776,22 @@ with tab_time:
             _sold_tot  = _t_old_fr.groupby('Slot').size().reset_index(name='_PrevTotal')
             _sold_canc = (_t_old_fr[_t_old_fr['Status'].isin(REJECTED_STATUSES)]
                          .groupby('Slot').size().reset_index(name='_PrevCancelled'))
-            _sold_fr2  = _sold_tot.merge(_sold_canc, on='Slot', how='left')
-            for _c in ['_PrevTotal', '_PrevCancelled']:
+            _sold_inp  = (_t_old_fr[_t_old_fr['Status'].isin(IN_PROGRESS_STATUSES)]
+                         .groupby('Slot').size().reset_index(name='_PrevInProgress'))
+            _sold_fr2  = (_sold_tot.merge(_sold_canc, on='Slot', how='left')
+                                   .merge(_sold_inp,  on='Slot', how='left'))
+            for _c in ['_PrevTotal', '_PrevCancelled', '_PrevInProgress']:
                 _sold_fr2[_c] = pd.to_numeric(_sold_fr2[_c], errors='coerce').fillna(0)
             _sold_all  = _sold_sales.merge(_sold_fr2, on='Slot', how='outer')
-            for _c in ['_PrevOrders','_PrevRevenue','_PrevTotal','_PrevCancelled']:
+            for _c in ['_PrevOrders','_PrevRevenue','_PrevTotal','_PrevCancelled','_PrevInProgress']:
                 _sold_all[_c] = pd.to_numeric(_sold_all[_c], errors='coerce').fillna(0)
             _sold_all['_PrevAOV'] = (_sold_all['_PrevRevenue'] /
                                      _sold_all['_PrevOrders'].where(_sold_all['_PrevOrders'] > 0)).round(0)
+            # Resolved = Total − In Progress, matching the current-period Cancel Rate
+            # denominator above (and the Summary Fail Rate definition).
+            _prev_resolved = _sold_all['_PrevTotal'] - _sold_all['_PrevInProgress']
             _sold_all['_PrevCancel'] = (_sold_all['_PrevCancelled'] /
-                                        _sold_all['_PrevTotal'].where(_sold_all['_PrevTotal'] > 0) * 100).round(1).fillna(0)
+                                        _prev_resolved.where(_prev_resolved > 0) * 100).round(1).fillna(0)
 
             slot_cmp = slot_df.merge(
                 _sold_all[['Slot','_PrevOrders','_PrevRevenue','_PrevAOV','_PrevCancel']],
@@ -2713,12 +3079,22 @@ with tab_monthly:
 # 🔀 BRAND × AGGREGATOR CROSS-MATRIX TAB
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_matrix:
-    st.markdown("### 🔀 Brand × Aggregator Matrix")
-    st.caption("Shows which aggregator drives volume and revenue for each brand.")
+    st.markdown("### 🔀 Brand Cross-Matrix")
+    st.caption("Shows which aggregator — or which city — drives volume and revenue for each brand.")
 
     if o_cur.empty:
         st.info("No data for current filters.")
     else:
+        # Column dimension: Aggregator (default) or City
+        if 'City' in o_cur.columns:
+            _mx_dim_label = st.radio("Compare brands across",
+                                     ["🚚 Aggregator", "🏙️ City"],
+                                     horizontal=True, key="mx_coldim")
+        else:
+            _mx_dim_label = "🚚 Aggregator"
+        _mx_col       = 'Provider' if 'Aggregator' in _mx_dim_label else 'City'
+        _mx_col_title = 'Aggregator' if _mx_col == 'Provider' else 'City'
+
         _mx_opts = ["Orders", "Revenue (SAR)", "AOV (SAR)", "Fill Rate %"]
         if compare_on and not o_old.empty:
             _mx_opts.append("% Change Orders vs Prev")
@@ -2729,18 +3105,22 @@ with tab_matrix:
             horizontal=True, key="mx_metric",
         )
 
-        _mx = o_cur_fr.copy()
-        _mx_base = _mx.groupby(['Brand', 'Provider']).agg(
+        # Orders / Revenue / AOV come from o_cur (respects ALL filters incl. Status)
+        # so they match the Brands and Aggregators tabs. Only the status counts
+        # for Fill Rate use the status-unfiltered slice — same rule as everywhere.
+        _mx_base = o_cur.groupby(['Brand', _mx_col]).agg(
             Orders  =('Order ID', 'count'),
             Revenue =('Sales',    'sum'),
         ).reset_index()
-        _mx_comp = (_mx[_mx['Status'] == 'Completed']
-                    .groupby(['Brand', 'Provider']).size().reset_index(name='Completed'))
-        _mx_canc = (_mx[_mx['Status'].isin(REJECTED_STATUSES)]
-                    .groupby(['Brand', 'Provider']).size().reset_index(name='Cancelled'))
+        _mx_comp = (o_cur_fr[o_cur_fr['Status'] == 'Completed']
+                    .groupby(['Brand', _mx_col]).size().reset_index(name='Completed'))
+        _mx_canc = (o_cur_fr[o_cur_fr['Status'].isin(REJECTED_STATUSES)]
+                    .groupby(['Brand', _mx_col]).size().reset_index(name='Cancelled'))
+        # Outer merges keep combos that only exist in the status-unfiltered slice
+        # (e.g. all-cancelled combos) so Fill Rate still renders for them.
         _mx_grp = (_mx_base
-                   .merge(_mx_comp, on=['Brand', 'Provider'], how='left')
-                   .merge(_mx_canc, on=['Brand', 'Provider'], how='left'))
+                   .merge(_mx_comp, on=['Brand', _mx_col], how='outer')
+                   .merge(_mx_canc, on=['Brand', _mx_col], how='outer'))
         for _c in ['Orders', 'Revenue', 'Completed', 'Cancelled']:
             _mx_grp[_c] = pd.to_numeric(_mx_grp[_c], errors='coerce').fillna(0)
         _mx_orders_safe = _mx_grp['Orders'].where(_mx_grp['Orders'] > 0)
@@ -2754,17 +3134,17 @@ with tab_matrix:
         if _pct_change_mode and compare_on and not o_old.empty:
             _raw_col = 'Orders' if 'Orders' in _mx_metric else 'Revenue (SAR)'
             _src_col = 'Orders' if _raw_col == 'Orders' else 'Revenue (SAR)'
-            _mx_old = o_old_fr.copy()
-            _mx_old_grp = _mx_old.groupby(['Brand', 'Provider']).agg(
+            # Previous period from o_old (same filter rules as the current matrix)
+            _mx_old_grp = o_old.groupby(['Brand', _mx_col]).agg(
                 Orders=('Order ID','count'), Revenue=('Sales','sum')
             ).reset_index()
             _mx_old_grp = _mx_old_grp.rename(columns={'Revenue': 'Revenue (SAR)'})
             for _c in ['Orders', 'Revenue (SAR)']:
                 _mx_old_grp[_c] = pd.to_numeric(_mx_old_grp[_c], errors='coerce').fillna(0)
             _pivot_cur = _mx_grp.pivot_table(
-                index='Brand', columns='Provider', values=_src_col, aggfunc='sum', fill_value=0)
+                index='Brand', columns=_mx_col, values=_src_col, aggfunc='sum', fill_value=0)
             _pivot_old = _mx_old_grp.pivot_table(
-                index='Brand', columns='Provider', values=_src_col, aggfunc='sum', fill_value=0)
+                index='Brand', columns=_mx_col, values=_src_col, aggfunc='sum', fill_value=0)
             _pivot_old = _pivot_old.reindex_like(_pivot_cur).fillna(0)
             pivot = ((_pivot_cur - _pivot_old) / _pivot_old.where(_pivot_old > 0) * 100).round(1).fillna(0)
             _val_col   = _mx_metric
@@ -2772,7 +3152,7 @@ with tab_matrix:
         else:
             _val_col = _mx_metric
             pivot = _mx_grp.pivot_table(
-                index='Brand', columns='Provider',
+                index='Brand', columns=_mx_col,
                 values=_val_col, aggfunc='sum', fill_value=0,
             )
             _hmap_cscale = 'Blues'
@@ -2803,9 +3183,9 @@ with tab_matrix:
             template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             height=max(400, 40 * len(pivot) + 120),
             margin=dict(l=10, r=10, t=30, b=60),
-            xaxis=dict(title="Aggregator", tickangle=-30),
+            xaxis=dict(title=_mx_col_title, tickangle=-30),
             yaxis=dict(title="", autorange="reversed"),
-            title=dict(text=f"{_val_col} per Brand × Aggregator", font=dict(size=13)),
+            title=dict(text=f"{_val_col} per Brand × {_mx_col_title}", font=dict(size=13)),
         )
         st.plotly_chart(fig_mx, use_container_width=True,
                         config={'scrollZoom': False, 'displayModeBar': 'hover'})
@@ -2815,9 +3195,11 @@ with tab_matrix:
         pivot_disp = pivot.copy().reset_index()
         pivot_disp.columns.name = None
 
-        # Add a row total column
+        # Row total only for additive metrics — summing AOVs, fill rates or
+        # % changes across columns would produce a meaningless number.
         num_cols = [c for c in pivot_disp.columns if c != 'Brand']
-        pivot_disp['Total'] = pivot_disp[num_cols].sum(axis=1)
+        if _val_col in ('Orders', 'Revenue (SAR)'):
+            pivot_disp['Total'] = pivot_disp[num_cols].sum(axis=1)
 
         if _pct_change_mode:
             _fmt_str = '{:+.1f}%'
@@ -2865,7 +3247,8 @@ with tab_matrix:
         if _pct_change_mode:
             st.caption("Green = growth vs previous period · Red = decline. Intensity reflects magnitude of change.")
         else:
-            st.caption("Each cell shows the selected metric for that Brand × Aggregator combination. 'Total' column is the row sum across all aggregators. Darker blue = higher value.")
+            _tot_note = " 'Total' column is the row sum." if 'Total' in pivot_disp.columns else ""
+            st.caption(f"Each cell shows the selected metric for that Brand × {_mx_col_title} combination.{_tot_note} Darker blue = higher value.")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 🔍 BRANCH DRILL-DOWN TAB
@@ -2927,6 +3310,52 @@ with tab_branch_drill:
             kd[4].metric("🎯 Fill Rate",  f"{_db_fill:.1f}%")
 
         st.markdown(f"**AOV:** {_db_aov:,.0f} SAR  ·  **In Progress:** {_db_inp:,}")
+
+        # ── Benchmarking: this branch vs its city's average vs company average ─
+        st.markdown("#### 🏁 How does this branch compare?")
+        _n_days_window = max((pd.Timestamp(ed) - pd.Timestamp(sd)).days + 1, 1)
+
+        def _bench_metrics(label, o_slice, fr_slice):
+            _rev, _n = o_slice['Sales'].sum(), len(o_slice)
+            _c   = (fr_slice['Status'] == 'Completed').sum()
+            _r   = fr_slice['Status'].isin(REJECTED_STATUSES).sum()
+            _den = _c + _r
+            _n_br = max(o_slice['Location'].nunique(), 1)
+            return {
+                'Scope':              label,
+                'AOV (SAR)':          (_rev / _n) if _n else float('nan'),
+                'Fill Rate %':        (_c / _den * 100) if _den else float('nan'),
+                'Fail Rate %':        (_r / _den * 100) if _den else float('nan'),
+                'Orders/Day/Branch':  _n / _n_days_window / _n_br,
+            }
+
+        _bench_rows = [_bench_metrics(f"📍 {_sel_branch}", _db_cur, _db_fr)]
+        if 'City' in o_cur.columns:
+            _bc_vals = df_all_o.loc[df_all_o['Location'] == _sel_branch, 'City'].dropna()
+            _br_city = _bc_vals.iloc[0] if len(_bc_vals) else None
+            if _br_city:
+                _bench_rows.append(_bench_metrics(
+                    f"🏙️ {_br_city} average",
+                    o_cur[o_cur['City'] == _br_city],
+                    o_cur_fr[o_cur_fr['City'] == _br_city],
+                ))
+        _bench_rows.append(_bench_metrics("🏢 Company average", o_cur, o_cur_fr))
+        _bench_df = pd.DataFrame(_bench_rows)
+        st.dataframe(
+            _bench_df.style.format({
+                'AOV (SAR)':         '{:,.0f}',
+                'Fill Rate %':       '{:.1f}%',
+                'Fail Rate %':       '{:.1f}%',
+                'Orders/Day/Branch': '{:,.1f}',
+            }, na_rep='—'),
+            use_container_width=True, hide_index=True,
+            height=60 + 35 * len(_bench_df),
+        )
+        st.caption(
+            "All rows use the same selected date range and filters. "
+            "'Orders/Day/Branch' divides total orders by days in range and by the number of "
+            "active branches in that scope, so a single branch is comparable to a city or the whole company."
+        )
         st.markdown("---")
 
         # ── Daily trend for this branch ───────────────────────────────────────
@@ -3114,7 +3543,39 @@ with tab_ai:
         # a locked-down sandbox, feed the EXACT result back to the model, and it
         # writes the final natural-language answer. Temperature is 0.0 throughout.
         # ══════════════════════════════════════════════════════════════════════
-        import ast, json, numbers
+        import ast, json
+
+        # ---- (0) MODEL CHAIN ----------------------------------------------------
+        # Groq's free tier hosts several strong tool-calling models. We try the
+        # best one first and fall back automatically when a model is
+        # decommissioned or unavailable, so the AI tab never breaks when Groq
+        # rotates its model lineup. The working model index is cached per session.
+        _AI_MODEL_CHAIN = [
+            "openai/gpt-oss-120b",        # strongest free reasoning + tool use on Groq
+            "llama-3.3-70b-versatile",    # previous default — proven, reliable fallback
+            "llama-3.1-8b-instant",       # last-resort small model
+        ]
+
+        def _ai_complete(_cl, **_kwargs):
+            """chat.completions.create with automatic model fallback."""
+            _start_idx = st.session_state.get("ai_model_idx", 0)
+            _last_err = None
+            for _mi in range(_start_idx, len(_AI_MODEL_CHAIN)):
+                try:
+                    _r = _cl.chat.completions.create(model=_AI_MODEL_CHAIN[_mi], **_kwargs)
+                    st.session_state["ai_model_idx"] = _mi
+                    return _r
+                except Exception as _me:
+                    _s = str(_me).lower()
+                    _model_issue = any(k in _s for k in (
+                        "decommission", "does not exist", "not found",
+                        "invalid model", "model_not_active", "no longer supported",
+                    ))
+                    if _model_issue and _mi < len(_AI_MODEL_CHAIN) - 1:
+                        _last_err = _me
+                        continue          # try the next model in the chain
+                    raise
+            raise _last_err
 
         # ---- (1) SANDBOX: safe execution of model-generated pandas code --------
         # Tiny builtins whitelist — no open / eval / exec / __import__ / getattr.
@@ -3134,6 +3595,21 @@ with tab_ai:
             "classmethod", "staticmethod", "property", "os", "sys", "subprocess",
             "shutil", "socket", "importlib", "builtins", "__builtins__",
         }
+        # Attributes the generated code may never access. pandas itself exposes
+        # file readers/writers (pd.read_csv could read secrets.toml; df.to_csv
+        # could write to disk) and expression evaluators that can reach the
+        # wider environment (pd.eval / df.query resolve @-variables via the
+        # caller's frame). to_datetime / to_numeric / to_frame etc. stay allowed.
+        _BLOCKED_ATTRS = {
+            "read_csv", "read_excel", "read_table", "read_fwf", "read_pickle",
+            "read_json", "read_html", "read_xml", "read_parquet", "read_feather",
+            "read_orc", "read_sql", "read_sql_query", "read_sql_table", "read_hdf",
+            "read_sas", "read_spss", "read_stata", "read_clipboard",
+            "to_csv", "to_excel", "to_pickle", "to_json", "to_html", "to_xml",
+            "to_parquet", "to_feather", "to_orc", "to_sql", "to_hdf", "to_stata",
+            "to_clipboard", "to_latex",
+            "eval", "query", "io",
+        }
 
         def _validate_ai_code(code):
             """AST whitelist. Blocks imports, while-loops (DoS), private/dunder
@@ -3150,6 +3626,8 @@ with tab_ai:
                     return False, "while-loops are not allowed"
                 if isinstance(_node, ast.Attribute) and _node.attr.startswith("_"):
                     return False, "private/dunder attribute access is not allowed"
+                if isinstance(_node, ast.Attribute) and _node.attr in _BLOCKED_ATTRS:
+                    return False, f"'{_node.attr}' is not allowed (no file/IO access)"
                 if isinstance(_node, ast.Name) and _node.id in _BLOCKED_NAMES:
                     return False, f"use of '{_node.id}' is not allowed"
             return True, ""
@@ -3222,27 +3700,6 @@ with tab_ai:
                 return result.head(max_rows).to_string()
             return str(result)
 
-        def _render_result(result):
-            """Show the computed value with native, theme-aware widgets
-            (st.metric for a single number, st.dataframe for a breakdown)."""
-            if result is None:
-                return
-            if isinstance(result, pd.DataFrame):
-                st.dataframe(result, use_container_width=True,
-                             height=min(420, 70 + 35 * min(len(result), 12)))
-            elif isinstance(result, pd.Series):
-                st.dataframe(result.rename("Value").to_frame(),
-                             use_container_width=True,
-                             height=min(420, 70 + 35 * min(len(result), 12)))
-            elif isinstance(result, numbers.Number) and not isinstance(result, bool):
-                _v = float(result)
-                _disp = f"{int(_v):,}" if _v == int(_v) else f"{_v:,.2f}"
-                st.metric("Result", _disp)
-            elif isinstance(result, dict):
-                st.json(result)
-            else:
-                st.write(result)
-
         # ---- (4) SYSTEM PROMPT: schema-grounded, computation-first -------------
         def _build_system_prompt():
             def _schema(df, name):
@@ -3263,6 +3720,7 @@ with tab_ai:
                 _parts = [f"Date range: {sd} to {ed}"]
                 for _lbl, _act, _key in [("Brands", active_brands, "Brand"),
                                           ("Branches", active_locs, "Location"),
+                                          ("Cities", active_cities, "City"),
                                           ("Providers", active_provs, "Provider"),
                                           ("Technologies", active_techs, "Technology"),
                                           ("Statuses", active_status, "Status")]:
@@ -3272,8 +3730,12 @@ with tab_ai:
                         _parts.append(f"{_lbl}: {_shown}" + (" (+more)" if len(_act) > 8 else ""))
                     else:
                         _parts.append(f"{_lbl}: all")
+                if sel_weekdays:
+                    _parts.append(f"Weekdays: {', '.join(sel_weekdays)}")
+                if sel_hours != (0, 23):
+                    _parts.append(f"Hours of day: {sel_hours[0]:02d}:00 to {sel_hours[1]:02d}:59")
                 return "\n  ".join(_parts)
-            _cat_vals = _cats(o_cur, ["Brand", "Location", "Provider", "Technology", "Status"])
+            _cat_vals = _cats(o_cur, ["Brand", "Location", "City", "Provider", "Technology", "Status"])
             return f"""You are a senior business-intelligence consultant for Alnumuw, a Saudi multi-brand restaurant group. You answer with EXACT, computed figures — never estimates or guesses.
 
 You have one tool: `run_pandas`. For ANY question that needs a number, total, average, rate, ranking, breakdown or comparison, you MUST call `run_pandas` with code that computes it and assigns the answer to `result`. Never do arithmetic yourself.
@@ -3303,6 +3765,7 @@ KEY CATEGORICAL VALUES (use exact spelling when filtering):
 DIMENSION DEFINITIONS — never confuse these:
   BRAND = restaurant concept     -> column 'Brand'
   BRANCH = physical location     -> column 'Location'
+  CITY = Saudi city the branch is in -> column 'City' (one city contains many branches)
   PROVIDER = delivery aggregator -> column 'Provider'
   TECHNOLOGY = POS system        -> column 'Technology'
 
@@ -3340,11 +3803,35 @@ CONVERSATION: If the user simply greets you, thanks you, or asks what you can do
         # A click on an example chip queues that question for this run.
         _pending_q = st.session_state.pop("_ai_pending_q", None)
 
-        # ── Declare the message container BEFORE chat_input so all messages
-        #    (history + new) render above the input box, not below it. ──────────
-        _chat_container = st.container()
+        # ── Header row: model badge + Clear button — always visible, never
+        #    pushed off-screen by a long conversation. ──────────────────────────
+        def _cb_clear_chat():
+            st.session_state.chat_history = []
+            st.session_state.pop("ai_call_times", None)
 
-        # ── Chat input pinned below the message area ───────────────────────────
+        _hd1, _hd2, _hd3 = st.columns([4.5, 1.8, 1.2])
+        with _hd2:
+            _active_model = _AI_MODEL_CHAIN[
+                min(st.session_state.get("ai_model_idx", 0), len(_AI_MODEL_CHAIN) - 1)
+            ].split("/")[-1]
+            st.markdown(
+                f"<div style='text-align:right;padding-top:8px'>"
+                f"<span style='font-size:0.75rem;padding:3px 10px;border-radius:12px;"
+                f"border:1px solid rgba(128,128,128,0.35);color:#9CA3AF'>"
+                f"🧠 {_html.escape(_active_model)}</span></div>",
+                unsafe_allow_html=True,
+            )
+        with _hd3:
+            st.button("🗑️ Clear", use_container_width=True, key="clear_ai_chat",
+                      help="Clear the conversation history",
+                      on_click=_cb_clear_chat,
+                      disabled=not st.session_state.chat_history)
+
+        # ── Fixed-height scrollable chat window. Messages scroll INSIDE this
+        #    box, so the input below never moves as the conversation grows. ─────
+        _chat_container = st.container(height=560)
+
+        # ── Chat input pinned below the message window ──────────────────────────
         _user_input = st.chat_input(
             "Ask anything about your data — e.g. 'Which brand had the highest cancellation rate?'"
         ) or _pending_q
@@ -3389,14 +3876,20 @@ CONVERSATION: If the user simply greets you, thanks you, or asks what you can do
             ]
             if len(st.session_state.ai_call_times) >= _RATE_MAX:
                 _wait = max(1, int(_RATE_WIN - (_now - st.session_state.ai_call_times[0])))
-                with st.chat_message("user"):
-                    st.markdown(_user_input)
-                with st.chat_message("assistant"):
-                    st.markdown(
-                        f"⏳ You're asking questions very quickly. Please wait about "
-                        f"**{_wait} seconds** and try again — this limit protects the shared "
-                        f"AI quota so it stays available for everyone."
-                    )
+                _rl_msg = (
+                    f"⏳ You're asking questions very quickly. Please wait about "
+                    f"**{_wait} seconds** and try again — this limit protects the shared "
+                    f"AI quota so it stays available for everyone."
+                )
+                # Render inside the chat window AND persist to history so the
+                # exchange doesn't vanish on the next rerun.
+                with _chat_container:
+                    with st.chat_message("user"):
+                        st.markdown(_user_input)
+                    with st.chat_message("assistant"):
+                        st.markdown(_rl_msg)
+                st.session_state.chat_history.append({"role": "user", "content": _user_input})
+                st.session_state.chat_history.append({"role": "assistant", "content": _rl_msg})
                 st.stop()
             st.session_state.ai_call_times.append(_now)
 
@@ -3428,9 +3921,12 @@ CONVERSATION: If the user simply greets you, thanks you, or asks what you can do
                     from groq import Groq as _Groq
                     _client = _Groq(api_key=ai_key)
 
-                    # Messages: system + prior text turns + the new question.
+                    # Messages: system + recent prior turns + the new question.
+                    # Cap context at the last 16 messages (~8 turns) — older turns
+                    # add token cost and latency without improving answers, and
+                    # the system prompt already carries the live data context.
                     _messages = [{"role": "system", "content": _build_system_prompt()}]
-                    for _m in st.session_state.chat_history[:-1]:
+                    for _m in st.session_state.chat_history[:-1][-16:]:
                         if _m.get("role") in ("user", "assistant") and _m.get("content"):
                             _messages.append({"role": _m["role"], "content": _m["content"]})
                     _messages.append({"role": "user", "content": _user_input})
@@ -3440,8 +3936,8 @@ CONVERSATION: If the user simply greets you, thanks you, or asks what you can do
                     # self-correct if its generated code raised an error.
                     for _round in range(3):
                         with st.spinner("Analysing your data …"):
-                            _resp = _client.chat.completions.create(
-                                model="llama-3.3-70b-versatile",
+                            _resp = _ai_complete(
+                                _client,
                                 messages=_messages, tools=_AI_TOOLS,
                                 tool_choice="auto", temperature=0.0, max_tokens=1500,
                             )
@@ -3486,8 +3982,8 @@ CONVERSATION: If the user simply greets you, thanks you, or asks what you can do
 
                     # ── Phase 2: stream the final written answer (tool-free) ───
                     if _did_compute:
-                        _answer_stream = _client.chat.completions.create(
-                            model="llama-3.3-70b-versatile",
+                        _answer_stream = _ai_complete(
+                            _client,
                             messages=_messages + [{
                                 "role": "user",
                                 "content": ("Using the computed results above, write the final answer "
@@ -3509,10 +4005,3 @@ CONVERSATION: If the user simply greets you, thanks you, or asks what you can do
             # Persist the assistant turn (text only — keeps the history clean).
             st.session_state.chat_history.append({"role": "assistant", "content": _final_text})
 
-        # ── Clear conversation ─────────────────────────────────────────────────
-        if st.session_state.get("chat_history"):
-            st.markdown("---")
-            if st.button("🗑️ Clear conversation", key="clear_ai_chat"):
-                st.session_state.chat_history = []
-                st.session_state.pop("ai_call_times", None)
-                st.rerun()
