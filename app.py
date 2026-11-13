@@ -120,16 +120,14 @@ def process(file_bytes):
     # Strip whitespace only — do NOT apply .str.title() because the source data
     # already uses correct mixed-case names (FoodiZone, UrbanPiper, MrMandoob,
     # AlHashimi Sweets, etc.) that title-casing would corrupt.
-    categorical_cols = ['Brand', 'Provider', 'Technology', 'Status', 'Location']
+    # fillna('Unknown') BEFORE astype(str): in pandas 3, astype(str) keeps
+    # blanks as real NaN, and the filters below use .dropna() + .isin(), so any
+    # blank cell would silently drop that order from every view.
+    categorical_cols = ['Brand', 'Provider', 'Technology', 'Status', 'Location', 'City']
     for col in categorical_cols:
         for df in [o, i]:
             if col in df.columns:
-                df[col] = df[col].astype(str).str.strip()
-
-    # Clean City column — strip leading/trailing whitespace only.
-    # City names are already consistent in the source file.
-    if 'City' in o.columns:
-        o['City'] = o['City'].astype(str).str.strip()
+                df[col] = df[col].fillna('Unknown').astype(str).str.strip()
 
     o['Sales'] = pd.to_numeric(o['Sales'], errors='coerce').fillna(0)
     # Discount column is optional — set to 0 when not present in the source file
@@ -303,7 +301,7 @@ def _cb_reset_date():
     st.session_state["date_range_key"] = (G_MIN, G_MAX)
 
 if 'Items' in df_all_i.columns:
-    df_all_i['Items'] = df_all_i['Items'].astype(str).str.strip()
+    df_all_i['Items'] = df_all_i['Items'].fillna('Unknown').astype(str).str.strip()
 
 # Relational mapping matrix for dynamic cascading controls.
 # Orders with no matching line in Items Report get a sentinel label so they
@@ -4354,4 +4352,3 @@ CONVERSATION: If the user simply greets you, thanks you, or asks what you can do
 
             # Persist the assistant turn (text only — keeps the history clean).
             st.session_state.chat_history.append({"role": "assistant", "content": _final_text})
-
